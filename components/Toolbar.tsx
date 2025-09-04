@@ -20,6 +20,7 @@ const ShapeToolGroup: React.FC<{
   setActiveTool: (tool: Tool) => void;
 }> = ({ activeTool, setActiveTool }) => {
   const [isFlyoutOpen, setIsFlyoutOpen] = useState(false);
+  const [flyoutPosition, setFlyoutPosition] = useState({ right: true, top: true });
 
   const activeShapeTool = useMemo(() => {
     return SHAPE_TOOLS.find(t => t.id === activeTool) || SHAPE_TOOLS[0];
@@ -29,11 +30,47 @@ const ShapeToolGroup: React.FC<{
     return SHAPE_TOOLS.some(t => t.id === activeTool);
   }, [activeTool]);
 
+  // Handle mouse enter with position calculation
+  const handleMouseEnter = (e: React.MouseEvent) => {
+    // Calculate if dropdown would go off screen
+    const toolbarRect = e.currentTarget.getBoundingClientRect();
+    const dropdownWidth = 56; // Approximate width of dropdown (56px)
+    const dropdownHeight = SHAPE_TOOLS.length * 40 + 8; // Approximate height
+    
+    const wouldOverflowRight = toolbarRect.right + dropdownWidth > window.innerWidth;
+    const wouldOverflowBottom = toolbarRect.top + dropdownHeight > window.innerHeight;
+    
+    setFlyoutPosition({
+      right: !wouldOverflowRight,
+      top: !wouldOverflowBottom
+    });
+    
+    setIsFlyoutOpen(true);
+  };
+
+  // Handle mouse leave with delay to prevent flickering
+  const handleMouseLeave = () => {
+    // Add a small delay to prevent flickering when moving between buttons
+    setTimeout(() => {
+      setIsFlyoutOpen(false);
+    }, 150);
+  };
+
+  // Handle mouse enter on dropdown to keep it open
+  const handleDropdownMouseEnter = () => {
+    setIsFlyoutOpen(true);
+  };
+
+  // Handle mouse leave on dropdown
+  const handleDropdownMouseLeave = () => {
+    setIsFlyoutOpen(false);
+  };
+
   return (
     <div 
       className="relative"
-      onMouseEnter={() => setIsFlyoutOpen(true)}
-      onMouseLeave={() => setIsFlyoutOpen(false)}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
       <Tooltip content={activeShapeTool.name} shortcut={activeShapeTool.shortcut} side="right">
         <button
@@ -48,7 +85,11 @@ const ShapeToolGroup: React.FC<{
         </button>
       </Tooltip>
       {isFlyoutOpen && (
-        <div className="absolute left-full top-0 ml-2 bg-white/10 backdrop-blur-xl rounded-lg border border-white/10 p-1 flex flex-col gap-1 shadow-lg">
+        <div 
+          className={`absolute ${flyoutPosition.right ? 'left-full ml-2' : 'right-full mr-2'} ${flyoutPosition.top ? 'top-0' : 'bottom-0'} bg-white/10 backdrop-blur-xl rounded-lg border border-white/10 p-1 flex flex-col gap-1 shadow-lg`}
+          onMouseEnter={handleDropdownMouseEnter}
+          onMouseLeave={handleDropdownMouseLeave}
+        >
           {SHAPE_TOOLS.map(tool => (
              <Tooltip key={tool.id} content={tool.name} shortcut={tool.shortcut} side="right">
               <button
