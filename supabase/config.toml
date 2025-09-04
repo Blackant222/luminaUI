@@ -1,0 +1,20 @@
+# Supabase CLI configuration file
+# This file is used by the Supabase CLI to configure your project
+
+project_id = "vhagzeyokwwjheljzwfw"
+
+[functions.generate-image]
+# Configuration for the generate-image function
+verify_jwt = false
+
+[functions.edit-image]
+# Configuration for the edit-image function
+verify_jwt = false
+
+[functions.merge-images]
+# Configuration for the merge-images function
+verify_jwt = false
+
+[functions.expand-image]
+# Configuration for the expand-image function
+verify_jwt = false
