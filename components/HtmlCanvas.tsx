@@ -1,14 +1,13 @@
-import React, { useState, useCallback, useRef, MouseEvent, useEffect, DragEvent, WheelEvent, ChangeEvent, KeyboardEvent } from 'react';
-import { Undo, Wand2, Camera } from 'lucide-react';
-import { Tool, CanvasElement, ImageElement, Point, ContextMenuItem, TextElement, CanvasState, CanvasAction } from '../types';
+import React, { useState, useCallback, useRef, useEffect, ChangeEvent } from 'react';
+import { Undo, Wand2, Camera, Maximize } from 'lucide-react';
+import { Tool, CanvasElement, ImageElement, Point, ContextMenuItem, CanvasState, CanvasAction } from '../types';
 import { CURSOR_MAP } from '../constants';
 import * as geminiService from '../services/geminiService';
-import Spinner from './Spinner';
 import AIPromptBar from './AIPromptBar';
 import ContextMenu from './ContextMenu';
 import PromptModal from './PromptModal';
 import AutoStyleModal from './AutoStyleModal';
-import { BringToFront, SendToBack, Copy, Trash2, Maximize } from 'lucide-react';
+import { BringToFront, SendToBack, Copy, Trash2 } from 'lucide-react';
 
 type BrushState = {
   element: ImageElement;
@@ -46,9 +45,6 @@ const isPointInElement = (point: Point, element: CanvasElement) => {
     );
 };
 
-const SHAPE_DRAWING_TOOLS = [Tool.Rectangle, Tool.Ellipse, Tool.Line, Tool.Arrow, Tool.Polygon, Tool.Star];
-const FRAME_ONLY_TOOLS = [Tool.Pen, Tool.Text, ...SHAPE_DRAWING_TOOLS];
-
 type CanvasProps = {
   activeTool: Tool;
   uploadTrigger: number;
@@ -67,6 +63,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
   const htmlCanvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const interactionRef = useRef<Interaction>(null);
+  const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
   const [brushState, setBrushState] = useState<BrushState>(null);
   const [globalIsLoading, setGlobalIsLoading] = useState(false);
@@ -74,7 +71,6 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
   const [aiEditPromptBar, setAiEditPromptBar] = useState<AiEditPromptBarState>({ isOpen: false, elementToEdit: null });
   const [autoStyleModal, setAutoStyleModal] = useState<AutoStyleModalState>({ isOpen: false, elementToStyle: null });
   const [expandingElementId, setExpandingElementId] = useState<string | null>(null);
-  const [editingElementId, setEditingElementId] = useState<string | null>(null);
 
   const screenToWorld = useCallback((screenPoint: Point): Point => {
     return {
@@ -82,6 +78,31 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       y: (screenPoint.y - view.pan.y) / view.zoom,
     };
   }, [view]);
+
+  const worldToScreen = useCallback((worldPoint: Point): Point => {
+    return {
+      x: worldPoint.x * view.zoom + view.pan.x,
+      y: worldPoint.y * view.zoom + view.pan.y,
+    };
+  }, [view]);
+
+  // Load image and cache it
+  const loadImage = useCallback((src: string): Promise<HTMLImageElement> => {
+    if (imageCacheRef.current.has(src)) {
+      return Promise.resolve(imageCacheRef.current.get(src)!);
+    }
+    
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        imageCacheRef.current.set(src, img);
+        resolve(img);
+      };
+      img.onerror = reject;
+      img.src = src;
+    });
+  }, []);
 
   // Redraw the canvas
   const redrawCanvas = useCallback(() => {
@@ -98,15 +119,44 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     state.elements.forEach(element => {
       switch (element.type) {
         case 'image':
-          const img = new Image();
-          img.onload = () => {
+          loadImage(element.src).then(img => {
             ctx.save();
             ctx.translate(element.x, element.y);
             ctx.rotate(element.rotation * Math.PI / 180);
             ctx.drawImage(img, 0, 0, element.width, element.height);
             ctx.restore();
-          };
-          img.src = element.src;
+            
+            // If this is the expanding element, draw expansion handles
+            if (expandingElementId === element.id) {
+              ctx.save();
+              ctx.strokeStyle = '#6D35FF';
+              ctx.lineWidth = 2 / view.zoom;
+              ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
+              
+              // Draw expansion handles
+              const handleSize = 8 / view.zoom;
+              const handles = [
+                { x: -handleSize, y: -handleSize }, // top-left
+                { x: element.width / 2 - handleSize / 2, y: -handleSize }, // top-center
+                { x: element.width - handleSize, y: -handleSize }, // top-right
+                { x: element.width - handleSize, y: element.height / 2 - handleSize / 2 }, // right-center
+                { x: element.width - handleSize, y: element.height - handleSize }, // bottom-right
+                { x: element.width / 2 - handleSize / 2, y: element.height - handleSize }, // bottom-center
+                { x: -handleSize, y: element.height - handleSize }, // bottom-left
+                { x: -handleSize, y: element.height / 2 - handleSize / 2 }, // left-center
+              ];
+              
+              handles.forEach(handle => {
+                ctx.fillStyle = '#6D35FF';
+                ctx.fillRect(handle.x, handle.y, handleSize, handleSize);
+                ctx.strokeRect(handle.x, handle.y, handleSize, handleSize);
+              });
+              
+              ctx.restore();
+            }
+          }).catch(err => {
+            console.error("Failed to load image:", err);
+          });
           break;
         case 'text':
           ctx.save();
@@ -136,7 +186,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         ctx.stroke();
       });
     }
-  }, [state.elements, brushState]);
+  }, [state.elements, brushState, loadImage, expandingElementId, view.zoom]);
 
   // Initialize canvas
   useEffect(() => {
@@ -189,7 +239,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         let currentBrushState = brushState;
         
         if (!currentBrushState || currentBrushState.element.id !== targetElement.id) {
-            if (currentBrushState) document.body.removeChild(currentBrushState.maskCanvas);
+            if (currentBrushState && document.body.contains(currentBrushState.maskCanvas)) {
+              document.body.removeChild(currentBrushState.maskCanvas);
+            }
             const maskCanvas = document.createElement('canvas');
             maskCanvas.width = window.innerWidth; 
             maskCanvas.height = window.innerHeight;
@@ -221,6 +273,43 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       }
     }
     
+    // Handle expand tool
+    if (expandingElementId) {
+      const expandingElement = state.elements.find(el => el.id === expandingElementId) as ImageElement | undefined;
+      if (expandingElement && isPointInElement(worldPos, expandingElement)) {
+        // Check if click is on an expansion handle
+        const handleSize = 8 / view.zoom;
+        const handles = [
+          { x: expandingElement.x - handleSize, y: expandingElement.y - handleSize, handle: 'top-left' },
+          { x: expandingElement.x + expandingElement.width / 2 - handleSize / 2, y: expandingElement.y - handleSize, handle: 'top-center' },
+          { x: expandingElement.x + expandingElement.width - handleSize, y: expandingElement.y - handleSize, handle: 'top-right' },
+          { x: expandingElement.x + expandingElement.width - handleSize, y: expandingElement.y + expandingElement.height / 2 - handleSize / 2, handle: 'right-center' },
+          { x: expandingElement.x + expandingElement.width - handleSize, y: expandingElement.y + expandingElement.height - handleSize, handle: 'bottom-right' },
+          { x: expandingElement.x + expandingElement.width / 2 - handleSize / 2, y: expandingElement.y + expandingElement.height - handleSize, handle: 'bottom-center' },
+          { x: expandingElement.x - handleSize, y: expandingElement.y + expandingElement.height - handleSize, handle: 'bottom-left' },
+          { x: expandingElement.x - handleSize, y: expandingElement.y + expandingElement.height / 2 - handleSize / 2, handle: 'left-center' },
+        ];
+        
+        for (const handle of handles) {
+          if (
+            screenPos.x >= handle.x && 
+            screenPos.x <= handle.x + handleSize && 
+            screenPos.y >= handle.y && 
+            screenPos.y <= handle.y + handleSize
+          ) {
+            interactionRef.current = { 
+              type: 'expand', 
+              handle: handle.handle, 
+              startX: screenPos.x, 
+              startY: screenPos.y, 
+              originalElement: expandingElement 
+            };
+            return;
+          }
+        }
+      }
+    }
+    
     // Handle element selection
     const clickedElement = state.elements.find(el => isPointInElement(worldPos, el));
     if (clickedElement) {
@@ -246,7 +335,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       // Clicked on empty space, clear selection
       dispatch({ type: 'CLEAR_SELECTION' });
     }
-  }, [activeTool, dispatch, isSpacePressed, view, screenToWorld, state.elements, state.selectedElementIds, brushState]);
+  }, [activeTool, dispatch, isSpacePressed, view, screenToWorld, state.elements, state.selectedElementIds, brushState, expandingElementId]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const screenPos = { x: e.clientX, y: e.clientY };
@@ -261,21 +350,12 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         currentStroke.push(screenPos);
         ctx.lineTo(screenPos.x, screenPos.y);
         ctx.stroke();
-        
-        // Also draw on main canvas
-        const canvas = htmlCanvasRef.current;
-        if (canvas) {
-          const mainCtx = canvas.getContext('2d');
-          if (mainCtx) {
-            mainCtx.lineTo(screenPos.x, screenPos.y);
-            mainCtx.stroke();
-          }
-        }
         return;
     }
     
     if (currentInteraction.type === 'pan') {
       setView(v => ({ ...v, pan: { x: screenPos.x - currentInteraction.startX, y: screenPos.y - currentInteraction.startY } }));
+      redrawCanvas();
       return;
     }
 
@@ -285,8 +365,15 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       const dy = worldPos.y - startViewY;
       const updates = originalElements.map(el => ({ id: el.id, changes: { x: el.x + dx, y: el.y + dy } }));
       dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates, overwriteHistory: true }});
+      redrawCanvas();
+      return;
     }
-  }, [dispatch, brushState, screenToWorld]);
+    
+    if (currentInteraction.type === 'expand' && expandingElementId) {
+      // Visual feedback for expansion
+      redrawCanvas();
+    }
+  }, [dispatch, brushState, screenToWorld, redrawCanvas, expandingElementId]);
 
   const handleMouseUp = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
     const currentInteraction = interactionRef.current;
@@ -294,11 +381,97 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
 
     if (currentInteraction.type === 'brushing' && brushState) {
       // Brushing finished, show prompt bar
+      interactionRef.current = null;
+      return;
+    }
+    
+    if (currentInteraction.type === 'expand' && expandingElementId) {
+      const { handle, startX, startY, originalElement } = currentInteraction;
+      const screenPos = { x: e.clientX, y: e.clientY };
+      const dx = (screenPos.x - startX) / view.zoom;
+      const dy = (screenPos.y - startY) / view.zoom;
+      
+      // Calculate new dimensions based on handle
+      let newWidth = originalElement.width;
+      let newHeight = originalElement.height;
+      let newX = originalElement.x;
+      let newY = originalElement.y;
+      
+      switch (handle) {
+        case 'right-center':
+          newWidth = Math.max(50, originalElement.width + dx);
+          break;
+        case 'bottom-center':
+          newHeight = Math.max(50, originalElement.height + dy);
+          break;
+        case 'bottom-right':
+          newWidth = Math.max(50, originalElement.width + dx);
+          newHeight = Math.max(50, originalElement.height + dy);
+          break;
+        case 'top-left':
+          newWidth = Math.max(50, originalElement.width - dx);
+          newHeight = Math.max(50, originalElement.height - dy);
+          newX = originalElement.x + dx;
+          newY = originalElement.y + dy;
+          break;
+        case 'top-right':
+          newWidth = Math.max(50, originalElement.width + dx);
+          newHeight = Math.max(50, originalElement.height - dy);
+          newY = originalElement.y + dy;
+          break;
+        case 'bottom-left':
+          newWidth = Math.max(50, originalElement.width - dx);
+          newHeight = Math.max(50, originalElement.height + dy);
+          newX = originalElement.x + dx;
+          break;
+        case 'top-center':
+          newHeight = Math.max(50, originalElement.height - dy);
+          newY = originalElement.y + dy;
+          break;
+        case 'left-center':
+          newWidth = Math.max(50, originalElement.width - dx);
+          newX = originalElement.x + dx;
+          break;
+      }
+      
+      // Expand the image
+      setGlobalIsLoading(true);
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: originalElement.id, changes: { isLoading: true } }] } });
+      
+      try {
+        const newImageSrc = await geminiService.expandImage(originalElement, { width: newWidth, height: newHeight });
+        dispatch({ 
+          type: 'UPDATE_ELEMENTS', 
+          payload: { 
+            updates: [{ 
+              id: originalElement.id, 
+              changes: { 
+                src: newImageSrc, 
+                width: newWidth, 
+                height: newHeight, 
+                x: newX, 
+                y: newY, 
+                isLoading: false 
+              } 
+            }] 
+          } 
+        });
+      } catch (error) {
+        console.error("Image expansion failed:", error);
+        alert("Sorry, the image expansion failed. Please try again.");
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: originalElement.id, changes: { isLoading: false } }] } });
+      } finally {
+        setGlobalIsLoading(false);
+        setExpandingElementId(null);
+      }
+      
+      interactionRef.current = null;
       return;
     }
 
     interactionRef.current = null;
-  }, [brushState]);
+    redrawCanvas();
+  }, [brushState, expandingElementId, view.zoom, dispatch]);
 
   const handleBrushSubmit = async (prompt: string) => {
     if (!brushState) return;
@@ -346,6 +519,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         if (document.body.contains(maskCanvas)) document.body.removeChild(maskCanvas);
         setBrushState(null);
         setActiveTool(Tool.Select);
+        redrawCanvas();
     }
   };
 
@@ -392,6 +566,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
          .then(newElements => { 
              if (newElements.length > 0) {
                  dispatch({ type: 'ADD_ELEMENTS', payload: { elements: newElements } });
+                 redrawCanvas();
              }
          })
          .catch(error => { 
@@ -399,7 +574,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
              const errorMessage = error instanceof Error ? error.message : "There was an error loading some of the images.";
              alert(errorMessage);
          });
-  }, [dispatch, screenToWorld, state.elements]);
+  }, [dispatch, screenToWorld, state.elements, redrawCanvas]);
 
   const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => { 
     e.preventDefault(); 
@@ -438,6 +613,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
           zIndex: nextZIndex 
         }; 
         dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newEl] }});
+        redrawCanvas();
       }; 
       img.src = imageSrc; 
     } catch (error) { 
@@ -482,6 +658,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         }; 
         dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }); 
         dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newEl] }}); 
+        redrawCanvas();
       }; 
       img.src = newImageSrc; 
     } catch (error) { 
@@ -508,8 +685,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       e.preventDefault();
       const delta = e.deltaY > 0 ? -0.1 : 0.1;
       setView(v => ({ ...v, zoom: Math.max(0.1, Math.min(3, v.zoom + delta)) }));
+      redrawCanvas();
     }
-  }, []);
+  }, [redrawCanvas]);
   const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
   }, []);
@@ -576,6 +754,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
             };
             dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
             dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false }});
+            redrawCanvas();
         };
         img.src = newImageSrc;
 
@@ -621,6 +800,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         
         dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
         dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false } });
+        redrawCanvas();
       };
       img.src = newImageSrc;
 
@@ -641,7 +821,6 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         if(interactionRef.current?.type === 'brushing') { interactionRef.current = null; }
         setActiveTool(Tool.Select);
         if (expandingElementId) setExpandingElementId(null);
-        if (editingElementId) setEditingElementId(null);
       }
       if(e.key === 'Backspace') { handleDelete(); } 
       else if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
@@ -649,7 +828,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     const handleKeyUp = (e: globalThis.KeyboardEvent) => { if (e.key === ' ') { setIsSpacePressed(false); } };
     window.addEventListener('keydown', handleKeyDown); window.addEventListener('keyup', handleKeyUp);
     return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); }
-  }, [handleDelete, undo, activeTool, expandingElementId, editingElementId, setActiveTool]);
+  }, [handleDelete, undo, activeTool, expandingElementId, setActiveTool]);
   
   useEffect(() => { if(uploadTrigger > 0) fileInputRef.current?.click(); }, [uploadTrigger]);
   useEffect(() => { 
@@ -661,7 +840,6 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     }
     if (activeTool !== Tool.Select) {
       setExpandingElementId(null);
-      setEditingElementId(null);
     }
   }, [activeTool, brushState]);
 
