@@ -241,7 +241,7 @@ type BrushState = {
   screenPointsStrokes: Point[][];
 } | null;
 
-type AiEditModalState = {
+type AiEditPromptBarState = {
     isOpen: boolean;
     elementToEdit: CanvasElement | null;
 }
@@ -289,7 +289,7 @@ const Canvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiveToo
   const [brushState, setBrushState] = useState<BrushState>(null);
   const [globalIsLoading, setGlobalIsLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
-  const [aiEditModal, setAiEditModal] = useState<AiEditModalState>({ isOpen: false, elementToEdit: null });
+  const [aiEditPromptBar, setAiEditPromptBar] = useState<AiEditPromptBarState>({ isOpen: false, elementToEdit: null });
   const [isOverFrameForDrawing, setIsOverFrameForDrawing] = useState(false);
   const [expandingElementId, setExpandingElementId] = useState<string | null>(null);
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
@@ -481,6 +481,8 @@ const Canvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiveToo
   const onExpandStart = useCallback((e: MouseEvent, element: ImageElement, handle: string) => {
     const worldPos = screenToWorld({x: e.clientX, y: e.clientY});
     interactionRef.current = { type: 'expand', handle, startX: worldPos.x, startY: worldPos.y, originalElement: element };
+    // Set the element as expanding so the handles are visible
+    setExpandingElementId(element.id);
   }, [screenToWorld]);
 
   const handleBrushStart = useCallback((e: MouseEvent, element: ImageElement) => {
@@ -495,7 +497,7 @@ const Canvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiveToo
         Object.assign(maskCanvas.style, { position: 'fixed', top: '0', left: '0', pointerEvents: 'none', zIndex: '10000', cursor: 'crosshair' });
         document.body.appendChild(maskCanvas);
         const ctx = maskCanvas.getContext('2d')!;
-        Object.assign(ctx, { strokeStyle: 'rgba(255, 255, 255, 0.7)', lineWidth: 40, lineCap: 'round', lineJoin: 'round' });
+        Object.assign(ctx, { strokeStyle: 'rgba(128, 0, 128, 0.25)', lineWidth: 40, lineCap: 'round', lineJoin: 'round' });
         currentBrushState = { element, maskCanvas, ctx, screenPointsStrokes: [] };
     }
     const { ctx, screenPointsStrokes } = currentBrushState;
@@ -552,6 +554,12 @@ const handleUpdateText = (id: string, content: string) => {
          return new Promise<ImageElement>((resolve, reject) => {
              geminiService.fileToBase64(file)
                  .then(({ data, mimeType }) => {
+                     // Check if the file is a supported image format
+                     if (!mimeType.startsWith('image/')) {
+                         reject(new Error(`Unsupported file type: ${mimeType}`));
+                         return;
+                     }
+                     
                      const src = `data:${mimeType};base64,${data}`;
                      const img = new Image();
                      img.onload = () => {
@@ -560,11 +568,24 @@ const handleUpdateText = (id: string, content: string) => {
                          const newElement: ImageElement = { id: crypto.randomUUID(), type: 'image', src, parentId: null, x: center.x + i * 20 - (img.width > 512 ? 256 : img.width/2), y: center.y + i * 20 - (img.height > 512 ? (256 * img.height / img.width)/2 : img.height/2), width: img.width > 512 ? 512 : img.width, height: img.height > 512 ? (512 * img.height / img.width) : img.height, rotation: 0, zIndex: nextZIndex };
                          resolve(newElement);
                      };
-                     img.onerror = reject; img.src = src;
+                     img.onerror = () => reject(new Error(`Failed to load image: ${file.name}`));
+                     img.src = src;
                  }).catch(reject);
          });
      });
-     Promise.all(imagePromises).then(newElements => { if (newElements.length > 0) dispatch({ type: 'ADD_ELEMENTS', payload: { elements: newElements }}); }).catch(error => { console.error("Error loading images:", error); alert("There was an error loading some of the images."); });
+     
+     Promise.all(imagePromises)
+         .then(newElements => { 
+             if (newElements.length > 0) {
+                 dispatch({ type: 'ADD_ELEMENTS', payload: { elements: newElements }
+             });
+         }})
+         .catch(error => { 
+             console.error("Error loading images:", error);
+             // Show a more descriptive error message
+             const errorMessage = error instanceof Error ? error.message : "There was an error loading some of the images.";
+             alert(errorMessage);
+         });
   }, [dispatch, screenToWorld, state.elements]);
 
   const handleDrop = useCallback(async (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/')); if (files.length > 0) addImagesToCanvas(files); }, [addImagesToCanvas]);
@@ -653,11 +674,11 @@ const handleUpdateText = (id: string, content: string) => {
 };
 
   const handleAiEditSubmit = async (prompt: string) => {
-      const { elementToEdit } = aiEditModal;
+      const { elementToEdit } = aiEditPromptBar;
       if (!elementToEdit) return;
       
       const elementId = elementToEdit.id;
-      setAiEditModal({ isOpen: false, elementToEdit: null });
+      setAiEditPromptBar({ isOpen: false, elementToEdit: null });
       setGlobalIsLoading(true);
       dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
 
@@ -738,8 +759,7 @@ const handleUpdateText = (id: string, content: string) => {
       const hasImageAndText = selectedElements.some(el => el.type === 'image') && selectedElements.some(el => el.type === 'text');
 
       const items: ContextMenuItem[] = [
-        { label: 'Edit Image with Text', action: handleAiEditText, icon: <MessageSquareText size={16}/>, disabled: !hasImageAndText },
-        { label: 'Edit with AI', action: () => setAiEditModal({ isOpen: true, elementToEdit: currentElement }), icon: <Wand2 size={16}/> },
+        { label: 'Edit with AI', action: () => setAiEditPromptBar({ isOpen: true, elementToEdit: currentElement }), icon: <Wand2 size={16}/> },
         ...(currentElement.type === 'image' ? [{ label: 'Expand Image', action: () => setExpandingElementId(currentElement.id), icon: <Maximize size={16}/> }] : []),
         { label: 'Bring to Front', action: handleBringToFront, icon: <BringToFront size={16}/> },
         { label: 'Send to Back', action: handleSendToBack, icon: <SendToBack size={16}/> },
@@ -747,7 +767,7 @@ const handleUpdateText = (id: string, content: string) => {
         { label: 'Delete', action: handleDelete, icon: <Trash2 size={16} /> },
       ];
       setContextMenu({ x: e.clientX, y: e.clientY, items });
-  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete, handleAiEditText]);
+  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete]);
 
   useEffect(() => {
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
@@ -780,6 +800,17 @@ const handleUpdateText = (id: string, content: string) => {
       setEditingElementId(null);
     }
   }, [activeTool, brushState]);
+
+  // Add this useEffect to clear brush when navigating away from canvas
+  useEffect(() => {
+    return () => {
+      // Cleanup function that runs when component unmounts
+      if (brushState && document.body.contains(brushState.maskCanvas)) {
+        document.body.removeChild(brushState.maskCanvas);
+      }
+      setBrushState(null);
+    };
+  }, [brushState]);
 
   const topLevelElements = state.elements.filter(el => el.parentId === null).sort((a,b) => a.zIndex - b.zIndex);
   const elementBeingCreatedId = (interactionRef.current?.type === 'draw' || interactionRef.current?.type === 'pen') ? interactionRef.current.elementId : null;
@@ -825,7 +856,7 @@ const handleUpdateText = (id: string, content: string) => {
       {showGenerateBar && <AIPromptBar onSubmit={handleAIGenerate} placeholder="A futuristic cityscape at sunset..." buttonText="Generate" isLoading={globalIsLoading} />}
       {showMergeBar && <AIPromptBar onSubmit={handleAIMerge} placeholder="Merge images into a surreal collage..." buttonText="Merge" isLoading={globalIsLoading} />}
       {showBrushBar && <AIPromptBar onSubmit={handleBrushSubmit} placeholder="Describe the edit for the selected area..." buttonText="Apply Edit" isLoading={globalIsLoading} />}
-      <PromptModal isOpen={aiEditModal.isOpen} onClose={() => setAiEditModal({isOpen: false, elementToEdit: null})} onSubmit={handleAiEditSubmit} isLoading={globalIsLoading} />
+      <PromptModal isOpen={aiEditPromptBar.isOpen} onClose={() => setAiEditPromptBar({isOpen: false, elementToEdit: null})} onSubmit={handleAiEditSubmit} isLoading={globalIsLoading} />
     </div>
   );
 };

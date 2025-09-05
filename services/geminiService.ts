@@ -9,6 +9,21 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
+// Add the missing fileToBase64 function
+export const fileToBase64 = (file: File): Promise<{ mimeType: string, data: string }> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      const result = reader.result as string;
+      const [header, data] = result.split(',');
+      const mimeType = header.match(/:(.*?);/)?.[1] || 'application/octet-stream';
+      resolve({ mimeType, data });
+    };
+    reader.onerror = error => reject(error);
+  });
+};
+
 const urlToBlob = async (url: string) => {
   const response = await fetch(url);
   const blob = await response.blob();

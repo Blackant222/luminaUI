@@ -34,8 +34,8 @@ const ShapeToolGroup: React.FC<{
   const handleMouseEnter = (e: React.MouseEvent) => {
     // Calculate if dropdown would go off screen
     const toolbarRect = e.currentTarget.getBoundingClientRect();
-    const dropdownWidth = 56; // Approximate width of dropdown (56px)
-    const dropdownHeight = SHAPE_TOOLS.length * 40 + 8; // Approximate height
+    const dropdownWidth = 45; // Reduced from 56px (approx 20% smaller)
+    const dropdownHeight = SHAPE_TOOLS.length * 32 + 8; // Reduced from 40px to 32px (20% smaller)
     
     const wouldOverflowRight = toolbarRect.right + dropdownWidth > window.innerWidth;
     const wouldOverflowBottom = toolbarRect.top + dropdownHeight > window.innerHeight;
@@ -75,7 +75,7 @@ const ShapeToolGroup: React.FC<{
       <Tooltip content={activeShapeTool.name} shortcut={activeShapeTool.shortcut} side="right">
         <button
           onClick={() => setActiveTool(activeShapeTool.id)}
-          className={`p-3 rounded-lg transition-all duration-200 ${
+          className={`p-2 rounded-lg transition-all duration-200 ${
             isShapeToolActive
               ? 'bg-[#6D35FF] text-white shadow-md'
               : 'text-white/80 hover:bg-white/10 hover:text-white'
@@ -97,7 +97,7 @@ const ShapeToolGroup: React.FC<{
                     setActiveTool(tool.id);
                     setIsFlyoutOpen(false);
                 }}
-                className={`p-2 rounded-md transition-all duration-200 ${
+                className={`p-1.5 rounded-md transition-all duration-200 ${
                   activeTool === tool.id
                     ? 'bg-[#6D35FF] text-white'
                     : 'text-white/80 hover:bg-white/10 hover:text-white'
@@ -118,13 +118,13 @@ const Toolbar: React.FC<ToolbarProps> = ({ activeTool, setActiveTool, onLogout, 
 
   return (
     <aside className="absolute top-1/2 left-6 -translate-y-1/2 z-10">
-      <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-2 flex flex-col items-center gap-2 shadow-lg">
+      <div className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-1.5 flex flex-col items-center gap-1.5 shadow-lg">
         <Tooltip content="Dashboard" shortcut="Esc" side="right">
             <button
               onClick={onExit}
-              className="p-3 rounded-lg text-white/80 hover:bg-white/10 hover:text-white transition-colors"
+              className="p-2 rounded-lg text-white/80 hover:bg-white/10 hover:text-white transition-colors"
             >
-              <Home size={24} />
+              <Home size={20} />
             </button>
         </Tooltip>
         <div className="w-full h-px bg-white/10 my-1"></div>
@@ -132,13 +132,13 @@ const Toolbar: React.FC<ToolbarProps> = ({ activeTool, setActiveTool, onLogout, 
           <button
             onClick={onSave}
             disabled={isSaving}
-            className={`p-3 rounded-lg transition-all duration-200 ${
+            className={`p-2 rounded-lg transition-all duration-200 ${
               isSaving
                 ? 'bg-white/10 text-white/50 cursor-not-allowed'
                 : 'text-white/80 hover:bg-white/10 hover:text-white'
             }`}
           >
-            <Save size={24} />
+            <Save size={20} />
           </button>
         </Tooltip>
         <div className="w-full h-px bg-white/10 my-1"></div>
@@ -146,7 +146,7 @@ const Toolbar: React.FC<ToolbarProps> = ({ activeTool, setActiveTool, onLogout, 
           <Tooltip key={tool.id} content={tool.name} shortcut={tool.shortcut} side="right">
             <button
               onClick={() => setActiveTool(tool.id)}
-              className={`p-3 rounded-lg transition-all duration-200 ${
+              className={`p-2 rounded-lg transition-all duration-200 ${
                 activeTool === tool.id
                   ? 'bg-[#6D35FF] text-white shadow-md'
                   : 'text-white/80 hover:bg-white/10 hover:text-white'
@@ -160,10 +160,10 @@ const Toolbar: React.FC<ToolbarProps> = ({ activeTool, setActiveTool, onLogout, 
         <div className="w-full h-px bg-white/10 my-1"></div>
         {toolsWithColor.includes(activeTool) && (
           <>
-            <div className="p-2 relative">
+            <div className="p-1.5 relative">
               <Tooltip content="Color" side="right">
                 <label htmlFor="color-picker" className="cursor-pointer">
-                  <div className="w-6 h-6 rounded-full border-2 border-white/50" style={{ backgroundColor: color }} />
+                  <div className="w-5 h-5 rounded-full border-2 border-white/50" style={{ backgroundColor: color }} />
                 </label>
               </Tooltip>
               <input
@@ -180,9 +180,9 @@ const Toolbar: React.FC<ToolbarProps> = ({ activeTool, setActiveTool, onLogout, 
         <Tooltip content="Logout" side="right">
           <button
             onClick={onLogout}
-            className="p-3 rounded-lg text-white/80 hover:bg-white/10 hover:text-white transition-colors"
+            className="p-2 rounded-lg text-white/80 hover:bg-white/10 hover:text-white transition-colors"
           >
-            <LogOut size={24} />
+            <LogOut size={20} />
           </button>
         </Tooltip>
       </div>
