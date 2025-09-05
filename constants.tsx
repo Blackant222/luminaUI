@@ -33,6 +33,7 @@ export const TOOLS = [
   { id: Tool.Merge, name: 'Merge', icon: <GitMerge size={24} /> },
   { id: Tool.Upload, name: 'Upload', icon: <UploadCloud size={24} /> },
   { id: Tool.AutoStyle, name: 'Auto-Style Product', icon: <AutoStyleIcon /> },
+  { id: Tool.Group, name: 'Group', icon: <GitMerge size={24} />, shortcut: 'G' },
 ];
 
 export const SHAPE_TOOLS = [

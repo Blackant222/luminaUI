@@ -19,7 +19,7 @@ const AIPromptBar: React.FC<AIPromptBarProps> = ({ onSubmit, placeholder, button
   };
 
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 w-full max-w-2xl px-4">
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4">
       <form
         onSubmit={handleSubmit}
         className="bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-2 flex items-center gap-2 shadow-lg transition-all duration-300 focus-within:border-white/20"

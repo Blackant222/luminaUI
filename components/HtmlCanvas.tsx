@@ -15,10 +15,13 @@ type BrushState = {
   screenPointsStrokes: Point[][];
 } | null;
 
-type AiEditPromptBarState = {
-    isOpen: boolean;
-    elementToEdit: CanvasElement | null;
-}
+type AIPromptBarConfig = {
+  onSubmit: (prompt: string) => void;
+  placeholder: string;
+  buttonText: string;
+  isVisible: boolean;
+  elementToEdit?: CanvasElement | null; // For edit/brush
+};
 
 type AutoStyleModalState = {
     isOpen: boolean;
@@ -93,7 +96,12 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
   const [brushState, setBrushState] = useState<BrushState>(null);
   const [globalIsLoading, setGlobalIsLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
-  const [aiEditPromptBar, setAiEditPromptBar] = useState<AiEditPromptBarState>({ isOpen: false, elementToEdit: null });
+  const [aiPromptBarConfig, setAiPromptBarConfig] = useState<AIPromptBarConfig>({
+    onSubmit: () => {},
+    placeholder: '',
+    buttonText: '',
+    isVisible: false,
+  });
   const [autoStyleModal, setAutoStyleModal] = useState<AutoStyleModalState>({ isOpen: false, elementToStyle: null });
   const [expandingElementId, setExpandingElementId] = useState<string | null>(null);
   const [editingTextElementId, setEditingTextElementId] = useState<string | null>(null);
@@ -111,6 +119,201 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       y: worldPoint.y * view.zoom + view.pan.y,
     };
   }, [view]);
+
+  // Add missing handler functions
+  const handleBringToFront = useCallback(() => dispatch({ type: 'BRING_TO_FRONT' }), [dispatch]);
+  const handleSendToBack = useCallback(() => dispatch({ type: 'SEND_TO_BACK' }), [dispatch]);
+  const handleDuplicate = useCallback(() => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }), [dispatch]);
+  const handleDelete = useCallback(() => dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }), [dispatch]);
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      setView(v => ({ ...v, zoom: Math.max(0.1, Math.min(3, v.zoom + delta)) }));
+      redrawCanvas();
+    }
+  }, [redrawCanvas]);
+
+  const handleAIGenerate = useCallback(async (prompt: string) => { 
+    setAiPromptBarConfig(prev => ({ ...prev, isVisible: false })); // Hide prompt bar
+    setGlobalIsLoading(true); 
+    try { 
+      const imageSrc = await geminiService.generateImage(prompt); 
+      const img = new Image(); 
+      img.onload = () => { 
+        const center = screenToWorld({ 
+          x: window.innerWidth / 2, 
+          y: window.innerHeight / 2 
+        }); 
+        const nextZIndex = state.elements.length > 0 ? 
+          Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1; 
+        const newEl: ImageElement = { 
+          id: crypto.randomUUID(), 
+          type: 'image', 
+          src: imageSrc, 
+          parentId: null, 
+          x: center.x-img.width/2, 
+          y: center.y-img.height/2, 
+          width: img.width, 
+          height: img.height, 
+          rotation: 0, 
+          zIndex: nextZIndex 
+        }; 
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newEl] }});
+        redrawCanvas();
+      }; 
+      img.src = imageSrc; 
+    } catch (error) { 
+      console.error("Image generation failed:", error); 
+      alert("Sorry, image generation failed. Please try again."); 
+    } finally { 
+      setGlobalIsLoading(false); 
+    } 
+  }, [dispatch, redrawCanvas, screenToWorld, state.elements]);
+  
+  const handleAIMerge = useCallback(async (prompt: string) => { 
+    setAiPromptBarConfig(prev => ({ ...prev, isVisible: false })); // Hide prompt bar
+    const selectedIds = state.selectedElementIds; 
+    const elementsToMerge = state.elements.filter((el): el is ImageElement => 
+      selectedIds.includes(el.id) && el.type === 'image'
+    ); 
+    if (elementsToMerge.length < 2) return; 
+    setGlobalIsLoading(true); 
+    dispatch({ 
+      type: 'UPDATE_ELEMENTS', 
+      payload: { 
+        updates: selectedIds.map(id => ({ id, changes: { isLoading: true } })) 
+      }
+    }); 
+    try { 
+      const imageUrls = elementsToMerge.map(el => el.src); 
+      const newImageSrc = await geminiService.mergeImages(imageUrls, prompt); 
+      const img = new Image(); 
+      img.onload = () => { 
+        const nextZIndex = state.elements.length > 0 ? 
+          Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1; 
+        const newEl: ImageElement = { 
+          id: crypto.randomUUID(), 
+          type: 'image', 
+          parentId: null, 
+          src: newImageSrc, 
+          x: elementsToMerge[0].x, 
+          y: elementsToMerge[0].y, 
+          width: img.width > 768 ? 768 : img.width, 
+          height: img.height > 768 ? (768 * img.height/img.width) : img.height, 
+          rotation: 0, 
+          zIndex: nextZIndex 
+        }; 
+        dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }); 
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newEl] }}); 
+        redrawCanvas();
+      }; 
+      img.src = newImageSrc; 
+    } catch (error) { 
+      console.error("Image merge failed:", error); 
+      alert("Sorry, image merge failed. Please try again."); 
+      dispatch({ 
+        type: 'UPDATE_ELEMENTS', 
+        payload: { 
+          updates: selectedIds.map(id => ({ id, changes: { isLoading: false } })) 
+        }
+      }); 
+    } finally { 
+      setGlobalIsLoading(false); 
+    } 
+  }, [dispatch, redrawCanvas, screenToWorld, state.elements, state.selectedElementIds]);
+
+  const handleAiEditSubmit = useCallback(async (prompt: string) => {
+      const { elementToEdit } = aiPromptBarConfig;
+      if (!elementToEdit) return;
+      
+      // Check if this is a brush operation
+      const isBrushOperation = elementToEdit.type === 'image' && brushState !== null;
+      
+      const elementId = elementToEdit.id;
+      setAiPromptBarConfig(prev => ({ ...prev, isVisible: false })); // Hide prompt bar
+      setGlobalIsLoading(true);
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
+
+      try {
+        if (isBrushOperation && brushState) {
+          // Handle brush operation
+          const { element, maskCanvas } = brushState;
+          
+          const finalMask = document.createElement('canvas');
+          finalMask.width = element.width; 
+          finalMask.height = element.height;
+          const finalCtx = finalMask.getContext('2d')!;
+          finalCtx.fillStyle = 'black'; 
+          finalCtx.fillRect(0, 0, finalMask.width, finalMask.height);
+          Object.assign(finalCtx, { 
+            strokeStyle: 'white', 
+            lineWidth: 40 / view.zoom, 
+            lineCap: 'round', 
+            lineJoin: 'round' 
+          });
+          
+          brushState.screenPointsStrokes.forEach(stroke => {
+              if (stroke.length === 0) return;
+              const relativePoints = stroke.map(p => screenToWorld(p)).map(p => ({ 
+                x: p.x - element.x, 
+                y: p.y - element.y 
+              }));
+              finalCtx.beginPath(); 
+              finalCtx.moveTo(relativePoints[0].x, relativePoints[0].y);
+              relativePoints.forEach(p => finalCtx.lineTo(p.x, p.y));
+              finalCtx.stroke();
+          });
+
+          try {
+              const maskData = finalMask.toDataURL('image/png');
+              const newImageSrc = await geminiService.editImageWithMask(element.src, maskData, prompt);
+              dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { src: newImageSrc, isLoading: false } }] } });
+          } catch (error) {
+              console.error("Image edit failed:", error); 
+              alert("Sorry, the image edit failed. Please try again.");
+              dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: false } }] } });
+          } finally {
+              if (document.body.contains(maskCanvas)) document.body.removeChild(maskCanvas);
+              setBrushState(null); // Clear brushState AFTER submission
+              setActiveTool(Tool.Select); // Set active tool AFTER submission
+          }
+        } else {
+          // Handle regular AI edit
+          let imageSrc = '';
+          if (elementToEdit.type === 'image') {
+            imageSrc = elementToEdit.src;
+          }
+          
+          const newImageSrc = await geminiService.editImageGlobally(imageSrc, prompt);
+          
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+              const originalElement = state.elements.find(el => el.id === elementId)!;
+              const newImageElement: ImageElement = { 
+                  ...originalElement, 
+                  type: 'image', 
+                  id: crypto.randomUUID(), 
+                  src: newImageSrc, 
+                  width: img.width, 
+                  height: img.height, 
+                  isLoading: false 
+              };
+              dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
+              dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false }});
+              redrawCanvas();
+          };
+          img.src = newImageSrc;
+        }
+      } catch (error) {
+        console.error("AI edit failed:", error); 
+        alert(`Sorry, the AI edit failed. ${error}`);
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: false }}] }});
+      } finally {
+        setGlobalIsLoading(false);
+      }
+  }, [brushState, dispatch, redrawCanvas, screenToWorld, setActiveTool, state.elements, view.zoom, aiPromptBarConfig]);
 
   // Load image and cache it
   const loadImage = useCallback((src: string): Promise<HTMLImageElement> => {
@@ -228,23 +431,25 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
               ctx.lineWidth = 2 / view.zoom;
               ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
               
-              // Draw resize handles
-              const handleSize = 8 / view.zoom;
+              // Draw resize handles (fixed screen size)
+              const screenHandleSize = 8; // 8 pixels on screen
+              const worldHandleSize = screenHandleSize / view.zoom;
+
               const handles = [
-                { x: element.x - handleSize/2, y: element.y - handleSize/2 }, // top-left
-                { x: element.x + element.width/2 - handleSize/2, y: element.y - handleSize/2 }, // top-center
-                { x: element.x + element.width - handleSize/2, y: element.y - handleSize/2 }, // top-right
-                { x: element.x + element.width - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // right-center
-                { x: element.x + element.width - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-right
-                { x: element.x + element.width/2 - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-center
-                { x: element.x - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-left
-                { x: element.x - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // left-center
+                { x: element.x - worldHandleSize/2, y: element.y - worldHandleSize/2 }, // top-left
+                { x: element.x + element.width/2 - worldHandleSize/2, y: element.y - worldHandleSize/2 }, // top-center
+                { x: element.x + element.width - worldHandleSize/2, y: element.y - worldHandleSize/2 }, // top-right
+                { x: element.x + element.width - worldHandleSize/2, y: element.y + element.height/2 - worldHandleSize/2 }, // right-center
+                { x: element.x + element.width - worldHandleSize/2, y: element.y + element.height - worldHandleSize/2 }, // bottom-right
+                { x: element.x + element.width/2 - worldHandleSize/2, y: element.y + element.height - worldHandleSize/2 }, // bottom-center
+                { x: element.x - worldHandleSize/2, y: element.y + element.height - worldHandleSize/2 }, // bottom-left
+                { x: element.x - worldHandleSize/2, y: element.y + element.height/2 - worldHandleSize/2 }, // left-center
               ];
               
               handles.forEach(handle => {
                 ctx.fillStyle = '#6D35FF';
-                ctx.fillRect(handle.x, handle.y, handleSize, handleSize);
-                ctx.strokeRect(handle.x, handle.y, handleSize, handleSize);
+                ctx.fillRect(handle.x, handle.y, worldHandleSize, worldHandleSize);
+                ctx.strokeRect(handle.x, handle.y, worldHandleSize, worldHandleSize);
               });
               
               ctx.restore();
@@ -260,23 +465,25 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
               ctx.lineWidth = 2 / view.zoom;
               ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
               
-              // Draw expansion handles
-              const handleSize = 8 / view.zoom;
+              // Draw expansion handles (fixed screen size)
+              const screenHandleSize = 8; // 8 pixels on screen
+              const worldHandleSize = screenHandleSize / view.zoom;
+
               const handles = [
-                { x: element.x - handleSize/2, y: element.y - handleSize/2 }, // top-left
-                { x: element.x + element.width/2 - handleSize/2, y: element.y - handleSize/2 }, // top-center
-                { x: element.x + element.width - handleSize/2, y: element.y - handleSize/2 }, // top-right
-                { x: element.x + element.width - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // right-center
-                { x: element.x + element.width - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-right
-                { x: element.x + element.width/2 - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-center
-                { x: element.x - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-left
-                { x: element.x - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // left-center
+                { x: element.x - worldHandleSize/2, y: element.y - worldHandleSize/2 }, // top-left
+                { x: element.x + element.width/2 - worldHandleSize/2, y: element.y - worldHandleSize/2 }, // top-center
+                { x: element.x + element.width - worldHandleSize/2, y: element.y - worldHandleSize/2 }, // top-right
+                { x: element.x + element.width - worldHandleSize/2, y: element.y + element.height/2 - worldHandleSize/2 }, // right-center
+                { x: element.x + element.width - worldHandleSize/2, y: element.y + element.height - worldHandleSize/2 }, // bottom-right
+                { x: element.x + element.width/2 - worldHandleSize/2, y: element.y + element.height - worldHandleSize/2 }, // bottom-center
+                { x: element.x - worldHandleSize/2, y: element.y + element.height - worldHandleSize/2 }, // bottom-left
+                { x: element.x - worldHandleSize/2, y: element.y + element.height/2 - worldHandleSize/2 }, // left-center
               ];
               
               handles.forEach(handle => {
                 ctx.fillStyle = '#6D35FF';
-                ctx.fillRect(handle.x, handle.y, handleSize, handleSize);
-                ctx.strokeRect(handle.x, handle.y, handleSize, handleSize);
+                ctx.fillRect(handle.x, handle.y, worldHandleSize, worldHandleSize);
+                ctx.strokeRect(handle.x, handle.y, worldHandleSize, worldHandleSize);
               });
               
               ctx.restore();
@@ -527,7 +734,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     if (e.button !== 0 || interactionRef.current) return;
     
     if (isSpacePressed || activeTool === Tool.Hand) {
-      interactionRef.current = { type: 'pan', startX: screenPos.x - view.pan.x, startY: screenPos.y - view.pan.y };
+      interactionRef.current = { type: 'pan', startX: screenPos.x, startY: screenPos.y };
       return;
     }
     
@@ -573,6 +780,15 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         ctx.beginPath();
         ctx.moveTo(screenPos.x, screenPos.y);
         setBrushState(currentBrushState);
+        
+        // Show the prompt bar immediately when brushing starts
+        setAiPromptBarConfig({
+          onSubmit: handleAiEditSubmit, // Use handleAiEditSubmit for brush edits
+          placeholder: "Describe the edit for the selected area...",
+          buttonText: "Apply Edit",
+          isVisible: true,
+          elementToEdit: targetElement,
+        });
         return;
       }
     }
@@ -741,25 +957,28 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     if (clickedElement) {
       // Check if we're clicking on a resize handle of a selected element
       if (state.selectedElementIds.includes(clickedElement.id)) {
-        // Check if click is on a resize handle
-        const handleSize = 8 / view.zoom;
+        // Check if click is on a resize handle (fixed screen size)
+        const screenHandleSize = 8; // 8 pixels on screen
+        const worldHandleSize = screenHandleSize / view.zoom; // Convert to world units for comparison
         const handles = [
-          { x: clickedElement.x - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-left' },
-          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-center' },
-          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-right' },
-          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'right-center' },
-          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-right' },
-          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-center' },
-          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-left' },
-          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'left-center' },
+          { x: clickedElement.x - worldHandleSize/2, y: clickedElement.y - worldHandleSize/2, handle: 'top-left' },
+          { x: clickedElement.x + clickedElement.width/2 - worldHandleSize/2, y: clickedElement.y - worldHandleSize/2, handle: 'top-center' },
+          { x: clickedElement.x + clickedElement.width - worldHandleSize/2, y: clickedElement.y - worldHandleSize/2, handle: 'top-right' },
+          { x: clickedElement.x + clickedElement.width - worldHandleSize/2, y: clickedElement.y + clickedElement.height/2 - worldHandleSize/2, handle: 'right-center' },
+          { x: clickedElement.x + clickedElement.width - worldHandleSize/2, y: clickedElement.y + clickedElement.height - worldHandleSize/2, handle: 'bottom-right' },
+          { x: clickedElement.x + clickedElement.width/2 - worldHandleSize/2, y: clickedElement.y + clickedElement.height - worldHandleSize/2, handle: 'bottom-center' },
+          { x: clickedElement.x - worldHandleSize/2, y: clickedElement.y + clickedElement.height - worldHandleSize/2, handle: 'bottom-left' },
+          { x: clickedElement.x - worldHandleSize/2, y: clickedElement.y + clickedElement.height/2 - worldHandleSize/2, handle: 'left-center' },
         ];
         
         for (const handle of handles) {
+          // Convert handle world coordinates to screen coordinates for hit detection
+          const screenHandlePos = worldToScreen({ x: handle.x, y: handle.y });
           if (
-            screenPos.x >= handle.x && 
-            screenPos.x <= handle.x + handleSize && 
-            screenPos.y >= handle.y && 
-            screenPos.y <= handle.y + handleSize
+            screenPos.x >= screenHandlePos.x && 
+            screenPos.x <= screenHandlePos.x + screenHandleSize && 
+            screenPos.y >= screenHandlePos.y && 
+            screenPos.y <= screenHandlePos.y + screenHandleSize
           ) {
             interactionRef.current = { 
               type: 'resize', 
@@ -775,25 +994,28 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       
       // If we're using the select tool, also check for resize handles on non-selected elements
       if (activeTool === Tool.Select) {
-        // Check if click is on a resize handle
-        const handleSize = 8 / view.zoom;
+        // Check if click is on a resize handle (fixed screen size)
+        const screenHandleSize = 8; // 8 pixels on screen
+        const worldHandleSize = screenHandleSize / view.zoom; // Convert to world units for comparison
         const handles = [
-          { x: clickedElement.x - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-left' },
-          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-center' },
-          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-right' },
-          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'right-center' },
-          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-right' },
-          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-center' },
-          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-left' },
-          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'left-center' },
+          { x: clickedElement.x - worldHandleSize/2, y: clickedElement.y - worldHandleSize/2, handle: 'top-left' },
+          { x: clickedElement.x + clickedElement.width/2 - worldHandleSize/2, y: clickedElement.y - worldHandleSize/2, handle: 'top-center' },
+          { x: clickedElement.x + clickedElement.width - worldHandleSize/2, y: clickedElement.y - worldHandleSize/2, handle: 'top-right' },
+          { x: clickedElement.x + clickedElement.width - worldHandleSize/2, y: clickedElement.y + clickedElement.height/2 - worldHandleSize/2, handle: 'right-center' },
+          { x: clickedElement.x + clickedElement.width - worldHandleSize/2, y: clickedElement.y + clickedElement.height - worldHandleSize/2, handle: 'bottom-right' },
+          { x: clickedElement.x + clickedElement.width/2 - worldHandleSize/2, y: clickedElement.y + clickedElement.height - worldHandleSize/2, handle: 'bottom-center' },
+          { x: clickedElement.x - worldHandleSize/2, y: clickedElement.y + clickedElement.height - worldHandleSize/2, handle: 'bottom-left' },
+          { x: clickedElement.x - worldHandleSize/2, y: clickedElement.y + clickedElement.height/2 - worldHandleSize/2, handle: 'left-center' },
         ];
         
         for (const handle of handles) {
+          // Convert handle world coordinates to screen coordinates for hit detection
+          const screenHandlePos = worldToScreen({ x: handle.x, y: handle.y });
           if (
-            screenPos.x >= handle.x && 
-            screenPos.x <= handle.x + handleSize && 
-            screenPos.y >= handle.y && 
-            screenPos.y <= handle.y + handleSize
+            screenPos.x >= screenHandlePos.x && 
+            screenPos.x <= screenHandlePos.x + screenHandleSize && 
+            screenPos.y >= screenHandlePos.y && 
+            screenPos.y <= screenHandlePos.y + screenHandleSize
           ) {
             // Select the element first, then start resize interaction
             dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
@@ -847,12 +1069,16 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         currentStroke.push(screenPos);
         ctx.lineTo(screenPos.x, screenPos.y);
         ctx.stroke();
-        redrawCanvas();
+        // No redrawCanvas here, as it's handled by the main useEffect for state changes
         return;
     }
     
     if (currentInteraction.type === 'pan') {
-      setView(v => ({ ...v, pan: { x: screenPos.x - currentInteraction.startX, y: screenPos.y - currentInteraction.startY } }));
+      const dx = screenPos.x - currentInteraction.startX;
+      const dy = screenPos.y - currentInteraction.startY;
+      setView(v => ({ ...v, pan: { x: v.pan.x + dx, y: v.pan.y + dy } }));
+      // Update the interaction start position for smooth panning
+      interactionRef.current = { ...currentInteraction, startX: screenPos.x, startY: screenPos.y };
       redrawCanvas();
       return;
     }
@@ -905,10 +1131,11 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     if (!currentInteraction) return;
 
     if (currentInteraction.type === 'brushing' && brushState) {
-      // Brushing finished, show prompt bar
+      // Brushing finished, keep prompt bar open, but stop interaction
       interactionRef.current = null;
-      setAiEditPromptBar({ isOpen: true, elementToEdit: brushState.element });
-      setActiveTool(Tool.Select);
+      // The prompt bar is already visible from handleMouseDown.
+      // Do NOT set activeTool to Tool.Select here. It will be set after prompt submission.
+      redrawCanvas(); // Redraw to show the mask
       return;
     }
     
@@ -1155,55 +1382,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     redrawCanvas();
   }, [brushState, expandingElementId, view.zoom, dispatch, screenToWorld, state.elements, color, redrawCanvas]);
 
-  const handleBrushSubmit = async (prompt: string) => {
-    if (!brushState) return;
-    const { element, maskCanvas } = brushState;
-    const elementId = element.id;
-    
-    const finalMask = document.createElement('canvas');
-    finalMask.width = element.width; 
-    finalMask.height = element.height;
-    const finalCtx = finalMask.getContext('2d')!;
-    finalCtx.fillStyle = 'black'; 
-    finalCtx.fillRect(0, 0, finalMask.width, finalMask.height);
-    Object.assign(finalCtx, { 
-      strokeStyle: 'white', 
-      lineWidth: 40 / view.zoom, 
-      lineCap: 'round', 
-      lineJoin: 'round' 
-    });
-    
-    brushState.screenPointsStrokes.forEach(stroke => {
-        if (stroke.length === 0) return;
-        const relativePoints = stroke.map(p => screenToWorld(p)).map(p => ({ 
-          x: p.x - element.x, 
-          y: p.y - element.y 
-        }));
-        finalCtx.beginPath(); 
-        finalCtx.moveTo(relativePoints[0].x, relativePoints[0].y);
-        relativePoints.forEach(p => finalCtx.lineTo(p.x, p.y));
-        finalCtx.stroke();
-    });
-
-    setGlobalIsLoading(true);
-    dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: true } }] } });
-
-    try {
-        const maskData = finalMask.toDataURL('image/png');
-        const newImageSrc = await geminiService.editImageWithMask(element.src, maskData, prompt);
-        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { src: newImageSrc, isLoading: false } }] } });
-    } catch (error) {
-        console.error("Image edit failed:", error); 
-        alert("Sorry, the image edit failed. Please try again.");
-        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: false } }] } });
-    } finally {
-        setGlobalIsLoading(false);
-        if (document.body.contains(maskCanvas)) document.body.removeChild(maskCanvas);
-        setBrushState(null);
-        setActiveTool(Tool.Select);
-        redrawCanvas();
-    }
-  };
+  // handleBrushSubmit is no longer needed as handleAiEditSubmit will handle brush edits
 
   const addImagesToCanvas = useCallback((files: File[]) => {
      const imagePromises = files.map((file, i) => {
@@ -1270,7 +1449,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     e.target.value = ''; 
   };
   
-  const handleAIGenerate = async (prompt: string) => { 
+  const handleAIGenerate = useCallback(async (prompt: string) => { 
+    setAiPromptBarConfig(prev => ({ ...prev, isVisible: false })); // Hide prompt bar
     setGlobalIsLoading(true); 
     try { 
       const imageSrc = await geminiService.generateImage(prompt); 
@@ -1304,9 +1484,10 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     } finally { 
       setGlobalIsLoading(false); 
     } 
-  };
+  }, [dispatch, redrawCanvas, screenToWorld, state.elements]);
   
-  const handleAIMerge = async (prompt: string) => { 
+  const handleAIMerge = useCallback(async (prompt: string) => { 
+    setAiPromptBarConfig(prev => ({ ...prev, isVisible: false })); // Hide prompt bar
     const selectedIds = state.selectedElementIds; 
     const elementsToMerge = state.elements.filter((el): el is ImageElement => 
       selectedIds.includes(el.id) && el.type === 'image'
@@ -1355,22 +1536,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     } finally { 
       setGlobalIsLoading(false); 
     } 
-  };
+  }, [dispatch, redrawCanvas, screenToWorld, state.elements, state.selectedElementIds]);
 
-  // Add missing handler functions
-  const handleBringToFront = useCallback(() => dispatch({ type: 'BRING_TO_FRONT' }), [dispatch]);
-  const handleSendToBack = useCallback(() => dispatch({ type: 'SEND_TO_BACK' }), [dispatch]);
-  const handleDuplicate = useCallback(() => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }), [dispatch]);
-  const handleDelete = useCallback(() => dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }), [dispatch]);
-  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    if (e.ctrlKey) {
-      e.preventDefault();
-      const delta = e.deltaY > 0 ? -0.1 : 0.1;
-      setView(v => ({ ...v, zoom: Math.max(0.1, Math.min(3, v.zoom + delta)) }));
-      redrawCanvas();
-    }
-  }, [redrawCanvas]);
-  
   const handleElementContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
       e.preventDefault();
       const screenPos = { x: e.clientX, y: e.clientY };
@@ -1387,7 +1554,13 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
 
       const items: ContextMenuItem[] = [
         { label: 'Edit with AI', action: () => {
-            setAiEditPromptBar({ isOpen: true, elementToEdit: currentElement });
+            setAiPromptBarConfig({ 
+              onSubmit: handleAiEditSubmit, 
+              placeholder: "Describe your edit...", 
+              buttonText: "Apply Edit", 
+              isVisible: true, 
+              elementToEdit: currentElement 
+            });
           }, icon: <Wand2 size={16}/> },
         ...(currentElement.type === 'image' ? [
           { label: 'Auto-Style Product Photo', action: () => setAutoStyleModal({ isOpen: true, elementToStyle: currentElement }), icon: <Camera size={16}/> },
@@ -1399,99 +1572,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         { label: 'Delete', action: handleDelete, icon: <Trash2 size={16} /> },
       ];
       setContextMenu({ x: e.clientX, y: e.clientY, items });
-  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete, screenToWorld]);
+  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete, screenToWorld, handleAiEditSubmit]);
 
-  const handleAiEditSubmit = async (prompt: string) => {
-      const { elementToEdit } = aiEditPromptBar;
-      if (!elementToEdit) return;
-      
-      // Check if this is a brush operation
-      const isBrushOperation = elementToEdit.type === 'image' && brushState !== null;
-      
-      const elementId = elementToEdit.id;
-      setAiEditPromptBar({ isOpen: false, elementToEdit: null });
-      setGlobalIsLoading(true);
-      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
-
-      try {
-        if (isBrushOperation && brushState) {
-          // Handle brush operation
-          const { element, maskCanvas } = brushState;
-          
-          const finalMask = document.createElement('canvas');
-          finalMask.width = element.width; 
-          finalMask.height = element.height;
-          const finalCtx = finalMask.getContext('2d')!;
-          finalCtx.fillStyle = 'black'; 
-          finalCtx.fillRect(0, 0, finalMask.width, finalMask.height);
-          Object.assign(finalCtx, { 
-            strokeStyle: 'white', 
-            lineWidth: 40 / view.zoom, 
-            lineCap: 'round', 
-            lineJoin: 'round' 
-          });
-          
-          brushState.screenPointsStrokes.forEach(stroke => {
-              if (stroke.length === 0) return;
-              const relativePoints = stroke.map(p => screenToWorld(p)).map(p => ({ 
-                x: p.x - element.x, 
-                y: p.y - element.y 
-              }));
-              finalCtx.beginPath(); 
-              finalCtx.moveTo(relativePoints[0].x, relativePoints[0].y);
-              relativePoints.forEach(p => finalCtx.lineTo(p.x, p.y));
-              finalCtx.stroke();
-          });
-
-          try {
-              const maskData = finalMask.toDataURL('image/png');
-              const newImageSrc = await geminiService.editImageWithMask(element.src, maskData, prompt);
-              dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { src: newImageSrc, isLoading: false } }] } });
-          } catch (error) {
-              console.error("Image edit failed:", error); 
-              alert("Sorry, the image edit failed. Please try again.");
-              dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: false } }] } });
-          } finally {
-              if (document.body.contains(maskCanvas)) document.body.removeChild(maskCanvas);
-              setBrushState(null);
-              setActiveTool(Tool.Select);
-          }
-        } else {
-          // Handle regular AI edit
-          let imageSrc = '';
-          if (elementToEdit.type === 'image') {
-            imageSrc = elementToEdit.src;
-          }
-          
-          const newImageSrc = await geminiService.editImageGlobally(imageSrc, prompt);
-          
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.onload = () => {
-              const originalElement = state.elements.find(el => el.id === elementId)!;
-              const newImageElement: ImageElement = { 
-                  ...originalElement, 
-                  type: 'image', 
-                  id: crypto.randomUUID(), 
-                  src: newImageSrc, 
-                  width: img.width, 
-                  height: img.height, 
-                  isLoading: false 
-              };
-              dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
-              dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false }});
-              redrawCanvas();
-          };
-          img.src = newImageSrc;
-        }
-      } catch (error) {
-        console.error("AI edit failed:", error); 
-        alert(`Sorry, the AI edit failed. ${error}`);
-        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: false }}] }});
-      } finally {
-        setGlobalIsLoading(false);
-      }
-  };
 
   // New function for auto-styling product photos
   const handleAutoStyleSubmit = async (prompt: string) => {
@@ -1559,7 +1641,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
   
   useEffect(() => { if(uploadTrigger > 0) fileInputRef.current?.click(); }, [uploadTrigger]);
   useEffect(() => { 
-    if (activeTool !== Tool.Brush) { 
+    // Only clear brushState if activeTool is not Brush AND the prompt bar is not visible for a brush edit
+    if (activeTool !== Tool.Brush && (!aiPromptBarConfig.isVisible || aiPromptBarConfig.elementToEdit?.type !== 'image' || brushState === null)) { 
         if (brushState && document.body.contains(brushState.maskCanvas)) {
             document.body.removeChild(brushState.maskCanvas); 
         }
@@ -1568,7 +1651,39 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     if (activeTool !== Tool.Select) {
       setExpandingElementId(null);
     }
-  }, [activeTool, brushState]);
+  }, [activeTool, brushState, aiPromptBarConfig.isVisible, aiPromptBarConfig.elementToEdit]);
+
+  // New useEffect to handle activeTool changes for Generate and Merge
+  useEffect(() => {
+    if (activeTool === Tool.Generate) {
+      setAiPromptBarConfig({
+        onSubmit: handleAIGenerate,
+        placeholder: "A futuristic cityscape at sunset...",
+        buttonText: "Generate",
+        isVisible: true,
+      });
+    } else if (activeTool === Tool.Merge) {
+      const selectedImageElements = state.elements.filter((el): el is ImageElement => 
+        state.selectedElementIds.includes(el.id) && el.type === 'image'
+      );
+      if (selectedImageElements.length > 1) {
+        setAiPromptBarConfig({
+          onSubmit: handleAIMerge,
+          placeholder: "Merge images into a surreal collage...",
+          buttonText: "Merge",
+          isVisible: true,
+        });
+      } else {
+        // If not enough images selected for merge, hide prompt bar
+        setAiPromptBarConfig(prev => ({ ...prev, isVisible: false }));
+      }
+    } else {
+      // For other tools, hide the general AI prompt bar, but keep brush prompt if active
+      if (!brushState) { // Only hide if not in a brush interaction
+        setAiPromptBarConfig(prev => ({ ...prev, isVisible: false }));
+      }
+    }
+  }, [activeTool, state.selectedElementIds, state.elements, handleAIGenerate, handleAIMerge, brushState]);
 
   // Add this useEffect to clear brush when navigating away from canvas
   useEffect(() => {
@@ -1581,9 +1696,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     };
   }, [brushState]);
 
-  const showGenerateBar = activeTool === Tool.Generate;
-  const showMergeBar = activeTool === Tool.Merge && state.selectedElementIds.filter(id => state.elements.find(el => el.id === id)?.type === 'image').length > 1;
-  const showBrushBar = (activeTool === Tool.Brush && brushState !== null) || (activeTool === Tool.Select && brushState !== null);
+  // Removed showGenerateBar, showMergeBar, showBrushBar as they are consolidated into aiPromptBarConfig
   const cursorStyle = isSpacePressed || activeTool === Tool.Hand ? 'grab' : CURSOR_MAP[activeTool] || 'default';
 
   return (
@@ -1605,14 +1718,12 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       <button onClick={(e) => { e.preventDefault(); undo(); }} disabled={!canUndo} className="absolute top-6 left-24 z-20 p-3 rounded-lg bg-white/5 backdrop-blur-xl border border-white/10 text-white/80 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition-all" title="Undo (Ctrl+Z)"><Undo size={20} /></button>
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       
-      {showGenerateBar && <AIPromptBar onSubmit={handleAIGenerate} placeholder="A futuristic cityscape at sunset..." buttonText="Generate" isLoading={globalIsLoading} />}
-      {showMergeBar && <AIPromptBar onSubmit={handleAIMerge} placeholder="Merge images into a surreal collage..." buttonText="Merge" isLoading={globalIsLoading} />}
-      {showBrushBar && <AIPromptBar onSubmit={handleBrushSubmit} placeholder="Describe the edit for the selected area..." buttonText="Apply Edit" isLoading={globalIsLoading} />}
-      {aiEditPromptBar.isOpen && (
+      {/* Conditionally render a single AIPromptBar based on aiPromptBarConfig */}
+      {aiPromptBarConfig.isVisible && (
         <AIPromptBar 
-          onSubmit={handleAiEditSubmit} 
-          placeholder="Describe your edit..."
-          buttonText="Apply Edit"
+          onSubmit={aiPromptBarConfig.onSubmit} 
+          placeholder={aiPromptBarConfig.placeholder} 
+          buttonText={aiPromptBarConfig.buttonText} 
           isLoading={globalIsLoading} 
         />
       )}
