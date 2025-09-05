@@ -1,18 +1,14 @@
-import React, { useRef, useEffect, useReducer, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
   CanvasElement,
   CanvasState,
   Tool,
   Point,
-  BrushState,
-  AiPromptBarConfig,
   ImageElement,
-  Element,
+  CanvasAction,
 } from '../types';
-import { useCanvasReducer } from '../hooks/useCanvasReducer';
-import { ProjectContext } from '../contexts/ProjectContext';
-import { getGeminiImage } from '../services/geminiService';
-import { ContextMenu } from './ContextMenu';
+import { editImageWithPrompt, urlToBase64 } from '../services/geminiService';
+import ContextMenu from './ContextMenu';
 import { AiEditModal } from './AiEditModal';
 
 // #region Helper Functions
@@ -23,16 +19,6 @@ const screenToWorld = (point: Point, viewState: { pan: Point; zoom: number }): P
   return {
     x: (point.x - viewState.pan.x) / viewState.zoom,
     y: (point.y - viewState.pan.y) / viewState.zoom,
-  };
-};
-
-/**
- * Converts world coordinates to screen coordinates.
- */
-const worldToScreen = (point: Point, viewState: { pan: Point; zoom: number }): Point => {
-  return {
-    x: point.x * viewState.zoom + viewState.pan.x,
-    y: point.y * viewState.zoom + viewState.pan.y,
   };
 };
 
@@ -73,29 +59,61 @@ const getResizeCorner = (point: Point, element: ImageElement, zoom: number): str
 export interface CanvasProps {
   activeTool: Tool;
   setActiveTool: (tool: Tool) => void;
-  isSpacePressed: boolean;
-  setBrushState: (state: BrushState) => void;
-  setAiPromptBarConfig: (config: AiPromptBarConfig | null) => void;
+  state: CanvasState;
+  dispatch: React.Dispatch<CanvasAction>;
 }
 
-export const HtmlCanvas: React.FC<CanvasProps> = ({
+const HtmlCanvas: React.FC<CanvasProps> = ({
   activeTool,
-  isSpacePressed,
-  setAiPromptBarConfig,
+  state,
+  dispatch,
 }) => {
-  const { state, dispatch } = useCanvasReducer();
-  const { elements, viewState } = state;
+  const { elements } = state;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const interactionRef = useRef<HTMLDivElement>(null);
 
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [viewState, setViewState] = useState({ pan: { x: 0, y: 0 }, zoom: 1 });
+  const [loadedImages, setLoadedImages] = useState<Record<string, HTMLImageElement>>({});
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState<Point>({ x: 0, y: 0 });
-  const [editingTextElementId, setEditingTextElementId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; elementId: string } | null>(null);
   const [aiEditModalOpen, setAiEditModalOpen] = useState(false);
   const [elementToEdit, setElementToEdit] = useState<ImageElement | null>(null);
   const [resizingCorner, setResizingCorner] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === ' ') {
+        setIsSpacePressed(true);
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === ' ') {
+        setIsSpacePressed(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
+  useEffect(() => {
+    elements.forEach(element => {
+        if (element.type === 'image' && element.src && !loadedImages[element.src]) {
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.src = element.src;
+            img.onload = () => {
+                setLoadedImages(prev => ({ ...prev, [element.src]: img }));
+            };
+        }
+    });
+  }, [elements, loadedImages]);
 
 
   /**
@@ -125,8 +143,9 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
 
         switch (element.type) {
             case 'image':
-                if (element.image) {
-                    ctx.drawImage(element.image, element.x, element.y, element.width, element.height);
+                const img = loadedImages[element.src];
+                if (img) {
+                    ctx.drawImage(img, element.x, element.y, element.width, element.height);
                 }
                 break;
             // Other element types drawing logic here...
@@ -134,18 +153,16 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
         ctx.restore();
     };
 
-    // Create a map for quick lookup
     const elementMap = new Map(elements.map(el => [el.id, el]));
     const drawnElements = new Set<string>();
 
-    // Draw elements respecting hierarchy
-    elements.forEach(element => {
-        if (!element.parentId) {
+    elements.sort((a, b) => a.zIndex - b.zIndex).forEach(element => {
+        if (!element.parentId || !elementMap.has(element.parentId)) {
             const drawWithChildren = (el: CanvasElement) => {
                 if (drawnElements.has(el.id)) return;
                 drawElement(el);
                 drawnElements.add(el.id);
-                const children = elements.filter(child => child.parentId === el.id);
+                const children = elements.filter(child => child.parentId === el.id).sort((a,b) => a.zIndex - b.zIndex);
                 children.forEach(drawWithChildren);
             }
             drawWithChildren(element);
@@ -154,7 +171,7 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
 
 
     ctx.restore();
-  }, [elements, viewState]);
+  }, [elements, viewState, loadedImages]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -174,17 +191,18 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
     const worldPoint = screenToWorld(startPoint, viewState);
     const clickedElement = elements.find(el => isPointInElement(worldPoint, el));
 
-    if (activeTool === 'select' && clickedElement && clickedElement.type === 'image') {
-        const corner = getResizeCorner(worldPoint, clickedElement as ImageElement, viewState.zoom);
-        if (corner) {
-            setResizingCorner(corner);
-            dispatch({ type: 'SELECT_ELEMENT', payload: clickedElement.id });
-            return;
+    if (activeTool === Tool.Select && clickedElement) {
+        if (clickedElement.type === 'image') {
+            const corner = getResizeCorner(worldPoint, clickedElement as ImageElement, viewState.zoom);
+            if (corner) {
+                setResizingCorner(corner);
+                dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
+                return;
+            }
         }
-    }
-
-    if (activeTool === 'select' && clickedElement) {
-      dispatch({ type: 'SELECT_ELEMENT', payload: clickedElement.id });
+        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
+    } else if (activeTool === Tool.Select && !clickedElement) {
+        dispatch({ type: 'CLEAR_SELECTION' });
     }
   };
 
@@ -195,11 +213,11 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
     const dx = point.x - dragStart.x;
     const dy = point.y - dragStart.y;
 
-    if (isSpacePressed || activeTool === 'hand') {
-      dispatch({ type: 'PAN', payload: { x: dx, y: dy } });
+    if (isSpacePressed) {
+      setViewState(vs => ({ ...vs, pan: { x: vs.pan.x + dx, y: vs.pan.y + dy }}));
       setDragStart(point);
-    } else if (resizingCorner && state.selectedElementId) {
-        const selectedElement = elements.find(el => el.id === state.selectedElementId) as ImageElement;
+    } else if (resizingCorner && state.selectedElementIds.length === 1) {
+        const selectedElement = elements.find(el => el.id === state.selectedElementIds[0]) as ImageElement;
         if (!selectedElement) return;
 
         const worldPoint = screenToWorld(point, viewState);
@@ -227,14 +245,18 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
                 y = worldPoint.y;
                 break;
         }
-        dispatch({ type: 'RESIZE_ELEMENT', payload: { id: state.selectedElementId, width, height, x, y } });
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: state.selectedElementIds[0], changes: { width, height, x, y } }] }});
 
-    } else if (activeTool === 'select' && state.selectedElementId) {
+    } else if (activeTool === Tool.Select && state.selectedElementIds.length > 0) {
       const delta = {
         x: dx / viewState.zoom,
         y: dy / viewState.zoom,
       };
-      dispatch({ type: 'MOVE_ELEMENT', payload: delta });
+      const updates = state.selectedElementIds.map(id => {
+        const el = elements.find(e => e.id === id)!;
+        return { id, changes: { x: el.x + delta.x, y: el.y + delta.y }};
+      });
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates, overwriteHistory: true } });
       setDragStart(point);
     }
   };
@@ -249,7 +271,14 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
     const point = { x: e.clientX, y: e.clientY };
     const zoomFactor = 1.1;
     const newZoom = e.deltaY < 0 ? viewState.zoom * zoomFactor : viewState.zoom / zoomFactor;
-    dispatch({ type: 'ZOOM', payload: { zoom: newZoom, point } });
+    
+    const worldPoint = screenToWorld(point, viewState);
+    const newPan = {
+      x: point.x - worldPoint.x * newZoom,
+      y: point.y - worldPoint.y * newZoom,
+    };
+
+    setViewState({ pan: newPan, zoom: newZoom });
   };
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -274,20 +303,19 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
   };
 
   const handleAiEditSubmit = async (prompt: string) => {
-    if (!elementToEdit || !elementToEdit.image) return;
+    if (!elementToEdit || !elementToEdit.src) return;
 
-    // This is a placeholder for getting the image data.
-    // In a real scenario, you might need to draw the image to a temporary canvas
-    // to get its base64 representation if you don't already have it.
-    const imageAsBase64 = (elementToEdit.image as any).src;
+    const { data: imageBase64 } = await urlToBase64(elementToEdit.src);
 
-    const newImageSrc = await getGeminiImage(prompt, imageAsBase64);
+    const newImageSrc = await editImageWithPrompt(imageBase64, prompt);
     const newImage = new Image();
+    newImage.crossOrigin = "anonymous";
     newImage.src = newImageSrc;
     newImage.onload = () => {
+      setLoadedImages(prev => ({...prev, [newImageSrc]: newImage}));
       dispatch({
-        type: 'UPDATE_ELEMENT',
-        payload: { ...elementToEdit, image: newImage },
+        type: 'UPDATE_ELEMENTS',
+        payload: { updates: [{ id: elementToEdit.id, changes: { src: newImageSrc } }] },
       });
     };
   };
@@ -311,7 +339,7 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
-          actions={[
+          items={[
             { label: 'Edit with AI', action: () => handleAiEdit(contextMenu.elementId) },
           ]}
         />
@@ -324,3 +352,5 @@ export const HtmlCanvas: React.FC<CanvasProps> = ({
     </>
   );
 };
+
+export default HtmlCanvas;
