@@ -610,7 +610,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     newImage.src = newImageSrc;
     newImage.onload = () => {
         const worldPoint = screenToWorld({ x: window.innerWidth / 2, y: window.innerHeight / 2 }, viewState);
-        const parentFrame = getFrameAtPoint(worldPoin t);
+        const parentFrame = getFrameAtPoint(worldPoint);
         const newElement: ImageElement = {
             id: crypto.randomUUID(),
             type: 'image',
