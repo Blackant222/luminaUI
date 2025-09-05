@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Tool, CanvasElement, CanvasState } from '../types';
 import Toolbar from './Toolbar';
-import HtmlCanvas from './HtmlCanvasFixed';
+import HtmlCanvas from './HtmlCanvas';
 import HelpWizard from './HelpWizard';
 import LayersPanel from './LayersPanel';
 import { useCanvasReducer } from '../hooks/useCanvasReducer';

@@ -587,7 +587,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     const drawingTools = [Tool.Frame, Tool.Rectangle, Tool.Ellipse, Tool.Line, Tool.Arrow, Tool.Polygon, Tool.Star, Tool.Pen, Tool.Text];
     if (drawingTools.includes(activeTool)) {
       // Check if we're clicking inside a frame for tools that require a frame
-      const frameTools = [Tool.Pen, Tool.Text];
+      const frameTools = []; // Pen and Text should work outside frames
       const clickedFrame = state.elements.find(el => el.type === 'frame' && isPointInElement(worldPos, el)) as FrameElement | undefined;
       
       if (frameTools.includes(activeTool) && !clickedFrame) {
@@ -800,6 +800,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     if (currentInteraction.type === 'brushing' && brushState) {
       // Brushing finished, show prompt bar
       interactionRef.current = null;
+      setAiEditPromptBar({ isOpen: true, elementToEdit: brushState.element });
       return;
     }
     
@@ -1226,40 +1227,85 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       const { elementToEdit } = aiEditPromptBar;
       if (!elementToEdit) return;
       
+      // Check if this is a brush operation
+      const isBrushOperation = elementToEdit.type === 'image' && brushState !== null;
+      
       const elementId = elementToEdit.id;
       setAiEditPromptBar({ isOpen: false, elementToEdit: null });
       setGlobalIsLoading(true);
       dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
 
       try {
-        // For now, we'll just use the element's src directly
-        // In a more complete implementation, we'd rasterize the element
-        let imageSrc = '';
-        if (elementToEdit.type === 'image') {
-          imageSrc = elementToEdit.src;
-        }
-        
-        const newImageSrc = await geminiService.editImageGlobally(imageSrc, prompt);
-        
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => {
-            const originalElement = state.elements.find(el => el.id === elementId)!;
-            const newImageElement: ImageElement = { 
-                ...originalElement, 
-                type: 'image', 
-                id: crypto.randomUUID(), 
-                src: newImageSrc, 
-                width: img.width, 
-                height: img.height, 
-                isLoading: false 
-            };
-            dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
-            dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false }});
-            redrawCanvas();
-        };
-        img.src = newImageSrc;
+        if (isBrushOperation && brushState) {
+          // Handle brush operation
+          const { element, maskCanvas } = brushState;
+          
+          const finalMask = document.createElement('canvas');
+          finalMask.width = element.width; 
+          finalMask.height = element.height;
+          const finalCtx = finalMask.getContext('2d')!;
+          finalCtx.fillStyle = 'black'; 
+          finalCtx.fillRect(0, 0, finalMask.width, finalMask.height);
+          Object.assign(finalCtx, { 
+            strokeStyle: 'white', 
+            lineWidth: 40 / view.zoom, 
+            lineCap: 'round', 
+            lineJoin: 'round' 
+          });
+          
+          brushState.screenPointsStrokes.forEach(stroke => {
+              if (stroke.length === 0) return;
+              const relativePoints = stroke.map(p => screenToWorld(p)).map(p => ({ 
+                x: p.x - element.x, 
+                y: p.y - element.y 
+              }));
+              finalCtx.beginPath(); 
+              finalCtx.moveTo(relativePoints[0].x, relativePoints[0].y);
+              relativePoints.forEach(p => finalCtx.lineTo(p.x, p.y));
+              finalCtx.stroke();
+          });
 
+          try {
+              const maskData = finalMask.toDataURL('image/png');
+              const newImageSrc = await geminiService.editImageWithMask(element.src, maskData, prompt);
+              dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { src: newImageSrc, isLoading: false } }] } });
+          } catch (error) {
+              console.error("Image edit failed:", error); 
+              alert("Sorry, the image edit failed. Please try again.");
+              dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: false } }] } });
+          } finally {
+              if (document.body.contains(maskCanvas)) document.body.removeChild(maskCanvas);
+              setBrushState(null);
+              setActiveTool(Tool.Select);
+          }
+        } else {
+          // Handle regular AI edit
+          let imageSrc = '';
+          if (elementToEdit.type === 'image') {
+            imageSrc = elementToEdit.src;
+          }
+          
+          const newImageSrc = await geminiService.editImageGlobally(imageSrc, prompt);
+          
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+              const originalElement = state.elements.find(el => el.id === elementId)!;
+              const newImageElement: ImageElement = { 
+                  ...originalElement, 
+                  type: 'image', 
+                  id: crypto.randomUUID(), 
+                  src: newImageSrc, 
+                  width: img.width, 
+                  height: img.height, 
+                  isLoading: false 
+              };
+              dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
+              dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false }});
+              redrawCanvas();
+          };
+          img.src = newImageSrc;
+        }
       } catch (error) {
         console.error("AI edit failed:", error); 
         alert(`Sorry, the AI edit failed. ${error}`);
@@ -1359,7 +1405,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
 
   const showGenerateBar = activeTool === Tool.Generate;
   const showMergeBar = activeTool === Tool.Merge && state.selectedElementIds.filter(id => state.elements.find(el => el.id === id)?.type === 'image').length > 1;
-  const showBrushBar = activeTool === Tool.Brush && brushState !== null;
+  const showBrushBar = aiEditPromptBar.isOpen && aiEditPromptBar.elementToEdit?.type === 'image' && brushState !== null;
   const cursorStyle = isSpacePressed || activeTool === Tool.Hand ? 'grab' : CURSOR_MAP[activeTool] || 'default';
 
   return (
