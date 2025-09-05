@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Tool, CanvasElement, CanvasState } from '../types';
 import Toolbar from './Toolbar';
-import Canvas from './Canvas';
+import HtmlCanvas from './HtmlCanvas';
 import HelpWizard from './HelpWizard';
 import LayersPanel from './LayersPanel';
 import { useCanvasReducer } from '../hooks/useCanvasReducer';
@@ -164,7 +164,7 @@ const EditorScreen: React.FC<EditorScreenProps> = ({ onLogout, onExit }) => {
         setColor={setColor}
       />
       <main className="w-full h-full">
-        <Canvas 
+        <HtmlCanvas 
           activeTool={activeTool} 
           setActiveTool={setActiveTool} 
           uploadTrigger={uploadTrigger}

@@ -1,0 +1,724 @@
+import React, { useState, useCallback, useRef, MouseEvent, useEffect, DragEvent, WheelEvent, ChangeEvent, KeyboardEvent } from 'react';
+import { Undo, Wand2, Camera } from 'lucide-react';
+import { Tool, CanvasElement, ImageElement, Point, ContextMenuItem, TextElement, CanvasState, CanvasAction } from '../types';
+import { CURSOR_MAP } from '../constants';
+import * as geminiService from '../services/geminiService';
+import Spinner from './Spinner';
+import AIPromptBar from './AIPromptBar';
+import ContextMenu from './ContextMenu';
+import PromptModal from './PromptModal';
+import AutoStyleModal from './AutoStyleModal';
+import { BringToFront, SendToBack, Copy, Trash2, Maximize } from 'lucide-react';
+
+type BrushState = {
+  element: ImageElement;
+  maskCanvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  screenPointsStrokes: Point[][];
+} | null;
+
+type AiEditPromptBarState = {
+    isOpen: boolean;
+    elementToEdit: CanvasElement | null;
+}
+
+type AutoStyleModalState = {
+    isOpen: boolean;
+    elementToStyle: CanvasElement | null;
+}
+
+type ViewState = { pan: Point; zoom: number };
+
+type Interaction = 
+  | { type: 'pan', startX: number, startY: number }
+  | { type: 'brushing' }
+  | { type: 'move', startViewX: number, startViewY: number, originalElements: CanvasElement[] }
+  | { type: 'resize', handle: string, startX: number, startY: number, originalElement: CanvasElement }
+  | { type: 'expand', handle: string, startX: number, startY: number, originalElement: ImageElement }
+  | null;
+
+const isPointInElement = (point: Point, element: CanvasElement) => {
+    return (
+      point.x >= element.x &&
+      point.x <= element.x + element.width &&
+      point.y >= element.y &&
+      point.y <= element.y + element.height
+    );
+};
+
+const SHAPE_DRAWING_TOOLS = [Tool.Rectangle, Tool.Ellipse, Tool.Line, Tool.Arrow, Tool.Polygon, Tool.Star];
+const FRAME_ONLY_TOOLS = [Tool.Pen, Tool.Text, ...SHAPE_DRAWING_TOOLS];
+
+type CanvasProps = {
+  activeTool: Tool;
+  uploadTrigger: number;
+  setActiveTool: (tool: Tool) => void;
+  color: string;
+  state: CanvasState;
+  dispatch: React.Dispatch<CanvasAction>;
+  undo: () => void;
+  canUndo: boolean;
+};
+
+const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiveTool, color, state, dispatch, undo, canUndo }) => {
+  const [view, setView] = useState<ViewState>({ pan: { x: 0, y: 0 }, zoom: 1 });
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const htmlCanvasRef = useRef<HTMLCanvasElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const interactionRef = useRef<Interaction>(null);
+
+  const [brushState, setBrushState] = useState<BrushState>(null);
+  const [globalIsLoading, setGlobalIsLoading] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+  const [aiEditPromptBar, setAiEditPromptBar] = useState<AiEditPromptBarState>({ isOpen: false, elementToEdit: null });
+  const [autoStyleModal, setAutoStyleModal] = useState<AutoStyleModalState>({ isOpen: false, elementToStyle: null });
+  const [expandingElementId, setExpandingElementId] = useState<string | null>(null);
+  const [editingElementId, setEditingElementId] = useState<string | null>(null);
+
+  const screenToWorld = useCallback((screenPoint: Point): Point => {
+    return {
+      x: (screenPoint.x - view.pan.x) / view.zoom,
+      y: (screenPoint.y - view.pan.y) / view.zoom,
+    };
+  }, [view]);
+
+  // Redraw the canvas
+  const redrawCanvas = useCallback(() => {
+    const canvas = htmlCanvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    // Clear canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw all elements
+    state.elements.forEach(element => {
+      switch (element.type) {
+        case 'image':
+          const img = new Image();
+          img.onload = () => {
+            ctx.save();
+            ctx.translate(element.x, element.y);
+            ctx.rotate(element.rotation * Math.PI / 180);
+            ctx.drawImage(img, 0, 0, element.width, element.height);
+            ctx.restore();
+          };
+          img.src = element.src;
+          break;
+        case 'text':
+          ctx.save();
+          ctx.font = `${element.fontSize}px ${element.fontFamily}`;
+          ctx.fillStyle = element.color;
+          ctx.fillText(element.content, element.x, element.y + element.fontSize);
+          ctx.restore();
+          break;
+        // Add other element types as needed
+      }
+    });
+    
+    // Draw brush strokes if active
+    if (brushState && brushState.element) {
+      brushState.screenPointsStrokes.forEach(stroke => {
+        if (stroke.length < 2) return;
+        
+        ctx.beginPath();
+        ctx.moveTo(stroke[0].x, stroke[0].y);
+        for (let i = 1; i < stroke.length; i++) {
+          ctx.lineTo(stroke[i].x, stroke[i].y);
+        }
+        ctx.strokeStyle = 'rgba(128, 0, 128, 0.25)';
+        ctx.lineWidth = 40;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      });
+    }
+  }, [state.elements, brushState]);
+
+  // Initialize canvas
+  useEffect(() => {
+    const canvas = htmlCanvasRef.current;
+    if (!canvas) return;
+    
+    // Set canvas size to match container
+    const resizeCanvas = () => {
+      if (canvasRef.current) {
+        canvas.width = canvasRef.current.clientWidth;
+        canvas.height = canvasRef.current.clientHeight;
+        redrawCanvas();
+      }
+    };
+    
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+    
+    return () => {
+      window.removeEventListener('resize', resizeCanvas);
+    };
+  }, [redrawCanvas]);
+
+  // Redraw when state changes
+  useEffect(() => {
+    redrawCanvas();
+  }, [state, redrawCanvas]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const screenPos = { x: e.clientX, y: e.clientY };
+    const worldPos = screenToWorld(screenPos);
+    setContextMenu(null);
+
+    if (e.button !== 0 || interactionRef.current) return;
+    
+    if (isSpacePressed || activeTool === Tool.Hand) {
+      interactionRef.current = { type: 'pan', startX: screenPos.x - view.pan.x, startY: screenPos.y - view.pan.y };
+      return;
+    }
+    
+    // Handle brush tool
+    if (activeTool === Tool.Brush) {
+      const targetElement = state.elements.find(el => 
+        el.type === 'image' && isPointInElement(worldPos, el)
+      ) as ImageElement | undefined;
+      
+      if (targetElement) {
+        interactionRef.current = { type: 'brushing' };
+        const screenPos = { x: e.clientX, y: e.clientY };
+        let currentBrushState = brushState;
+        
+        if (!currentBrushState || currentBrushState.element.id !== targetElement.id) {
+            if (currentBrushState) document.body.removeChild(currentBrushState.maskCanvas);
+            const maskCanvas = document.createElement('canvas');
+            maskCanvas.width = window.innerWidth; 
+            maskCanvas.height = window.innerHeight;
+            Object.assign(maskCanvas.style, { 
+              position: 'fixed', 
+              top: '0', 
+              left: '0', 
+              pointerEvents: 'none', 
+              zIndex: '10000', 
+              cursor: 'crosshair' 
+            });
+            document.body.appendChild(maskCanvas);
+            const ctx = maskCanvas.getContext('2d')!;
+            Object.assign(ctx, { 
+              strokeStyle: 'rgba(128, 0, 128, 0.25)', 
+              lineWidth: 40, 
+              lineCap: 'round', 
+              lineJoin: 'round' 
+            });
+            currentBrushState = { element: targetElement, maskCanvas, ctx, screenPointsStrokes: [] };
+        }
+        
+        const { ctx, screenPointsStrokes } = currentBrushState;
+        screenPointsStrokes.push([screenPos]);
+        ctx.beginPath();
+        ctx.moveTo(screenPos.x, screenPos.y);
+        setBrushState(currentBrushState);
+        return;
+      }
+    }
+    
+    // Handle element selection
+    const clickedElement = state.elements.find(el => isPointInElement(worldPos, el));
+    if (clickedElement) {
+      if (!state.selectedElementIds.includes(clickedElement.id)) {
+        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
+      }
+      
+      // Start moving interaction
+      const newSelectedIds = e.shiftKey ? 
+        (state.selectedElementIds.includes(clickedElement.id) ? 
+          state.selectedElementIds.filter(sid => sid !== clickedElement.id) : 
+          [...state.selectedElementIds, clickedElement.id]) : 
+        [clickedElement.id];
+        
+      const elementsToMove = state.elements.filter(el => newSelectedIds.includes(el.id));
+      interactionRef.current = { 
+        type: 'move', 
+        startViewX: worldPos.x, 
+        startViewY: worldPos.y, 
+        originalElements: elementsToMove 
+      };
+    } else {
+      // Clicked on empty space, clear selection
+      dispatch({ type: 'CLEAR_SELECTION' });
+    }
+  }, [activeTool, dispatch, isSpacePressed, view, screenToWorld, state.elements, state.selectedElementIds, brushState]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const screenPos = { x: e.clientX, y: e.clientY };
+    const worldPos = screenToWorld(screenPos);
+    
+    const currentInteraction = interactionRef.current;
+    if (!currentInteraction) return;
+
+    if (currentInteraction.type === 'brushing' && brushState) {
+        const { ctx, screenPointsStrokes } = brushState;
+        const currentStroke = screenPointsStrokes[screenPointsStrokes.length - 1];
+        currentStroke.push(screenPos);
+        ctx.lineTo(screenPos.x, screenPos.y);
+        ctx.stroke();
+        
+        // Also draw on main canvas
+        const canvas = htmlCanvasRef.current;
+        if (canvas) {
+          const mainCtx = canvas.getContext('2d');
+          if (mainCtx) {
+            mainCtx.lineTo(screenPos.x, screenPos.y);
+            mainCtx.stroke();
+          }
+        }
+        return;
+    }
+    
+    if (currentInteraction.type === 'pan') {
+      setView(v => ({ ...v, pan: { x: screenPos.x - currentInteraction.startX, y: screenPos.y - currentInteraction.startY } }));
+      return;
+    }
+
+    if (currentInteraction.type === 'move') {
+      const { startViewX, startViewY, originalElements } = currentInteraction;
+      const dx = worldPos.x - startViewX;
+      const dy = worldPos.y - startViewY;
+      const updates = originalElements.map(el => ({ id: el.id, changes: { x: el.x + dx, y: el.y + dy } }));
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates, overwriteHistory: true }});
+    }
+  }, [dispatch, brushState, screenToWorld]);
+
+  const handleMouseUp = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    const currentInteraction = interactionRef.current;
+    if (!currentInteraction) return;
+
+    if (currentInteraction.type === 'brushing' && brushState) {
+      // Brushing finished, show prompt bar
+      return;
+    }
+
+    interactionRef.current = null;
+  }, [brushState]);
+
+  const handleBrushSubmit = async (prompt: string) => {
+    if (!brushState) return;
+    const { element, maskCanvas } = brushState;
+    const elementId = element.id;
+    
+    const finalMask = document.createElement('canvas');
+    finalMask.width = element.width; 
+    finalMask.height = element.height;
+    const finalCtx = finalMask.getContext('2d')!;
+    finalCtx.fillStyle = 'black'; 
+    finalCtx.fillRect(0, 0, finalMask.width, finalMask.height);
+    Object.assign(finalCtx, { 
+      strokeStyle: 'white', 
+      lineWidth: 40 / view.zoom, 
+      lineCap: 'round', 
+      lineJoin: 'round' 
+    });
+    
+    brushState.screenPointsStrokes.forEach(stroke => {
+        if (stroke.length === 0) return;
+        const relativePoints = stroke.map(p => screenToWorld(p)).map(p => ({ 
+          x: p.x - element.x, 
+          y: p.y - element.y 
+        }));
+        finalCtx.beginPath(); 
+        finalCtx.moveTo(relativePoints[0].x, relativePoints[0].y);
+        relativePoints.forEach(p => finalCtx.lineTo(p.x, p.y));
+        finalCtx.stroke();
+    });
+
+    setGlobalIsLoading(true);
+    dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: true } }] } });
+    
+    try {
+        const maskData = finalMask.toDataURL('image/png');
+        const newImageSrc = await geminiService.editImageWithMask(element.src, maskData, prompt);
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { src: newImageSrc, isLoading: false } }] } });
+    } catch (error) {
+        console.error("Image edit failed:", error); 
+        alert("Sorry, the image edit failed. Please try again.");
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: false } }] } });
+    } finally {
+        setGlobalIsLoading(false);
+        if (document.body.contains(maskCanvas)) document.body.removeChild(maskCanvas);
+        setBrushState(null);
+        setActiveTool(Tool.Select);
+    }
+  };
+
+  const addImagesToCanvas = useCallback((files: File[]) => {
+     const imagePromises = files.map((file, i) => {
+         return new Promise<ImageElement>((resolve, reject) => {
+             geminiService.fileToBase64(file)
+                 .then(({ data, mimeType }) => {
+                     if (!mimeType.startsWith('image/')) {
+                         reject(new Error(`Unsupported file type: ${mimeType}`));
+                         return;
+                     }
+                     
+                     const src = `data:${mimeType};base64,${data}`;
+                     const img = new Image();
+                     img.onload = () => {
+                         const center = screenToWorld({ 
+                           x: window.innerWidth / 2, 
+                           y: window.innerHeight / 2 
+                         });
+                         const nextZIndex = state.elements.length > 0 ? 
+                           Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1;
+                         const newElement: ImageElement = { 
+                           id: crypto.randomUUID(), 
+                           type: 'image', 
+                           src, 
+                           parentId: null, 
+                           x: center.x + i * 20 - (img.width > 512 ? 256 : img.width/2), 
+                           y: center.y + i * 20 - (img.height > 512 ? (256 * img.height / img.width)/2 : img.height/2), 
+                           width: img.width > 512 ? 512 : img.width, 
+                           height: img.height > 512 ? (512 * img.height / img.width) : img.height, 
+                           rotation: 0, 
+                           zIndex: nextZIndex 
+                         };
+                         resolve(newElement);
+                     };
+                     img.onerror = () => reject(new Error(`Failed to load image: ${file.name}`));
+                     img.src = src;
+                 }).catch(reject);
+         });
+     });
+     
+     Promise.all(imagePromises)
+         .then(newElements => { 
+             if (newElements.length > 0) {
+                 dispatch({ type: 'ADD_ELEMENTS', payload: { elements: newElements } });
+             }
+         })
+         .catch(error => { 
+             console.error("Error loading images:", error);
+             const errorMessage = error instanceof Error ? error.message : "There was an error loading some of the images.";
+             alert(errorMessage);
+         });
+  }, [dispatch, screenToWorld, state.elements]);
+
+  const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => { 
+    e.preventDefault(); 
+    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/')); 
+    if (files.length > 0) addImagesToCanvas(files); 
+  }, [addImagesToCanvas]);
+  
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => { 
+    const files = Array.from(e.target.files || []).filter(f => f.type.startsWith('image/')); 
+    if (files.length > 0) addImagesToCanvas(files); 
+    e.target.value = ''; 
+  };
+  
+  const handleAIGenerate = async (prompt: string) => { 
+    setGlobalIsLoading(true); 
+    try { 
+      const imageSrc = await geminiService.generateImage(prompt); 
+      const img = new Image(); 
+      img.onload = () => { 
+        const center = screenToWorld({ 
+          x: window.innerWidth / 2, 
+          y: window.innerHeight / 2 
+        }); 
+        const nextZIndex = state.elements.length > 0 ? 
+          Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1; 
+        const newEl: ImageElement = { 
+          id: crypto.randomUUID(), 
+          type: 'image', 
+          src: imageSrc, 
+          parentId: null, 
+          x: center.x-img.width/2, 
+          y: center.y-img.height/2, 
+          width: img.width, 
+          height: img.height, 
+          rotation: 0, 
+          zIndex: nextZIndex 
+        }; 
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newEl] }});
+      }; 
+      img.src = imageSrc; 
+    } catch (error) { 
+      console.error("Image generation failed:", error); 
+      alert("Sorry, image generation failed. Please try again."); 
+    } finally { 
+      setGlobalIsLoading(false); 
+    } 
+  };
+  
+  const handleAIMerge = async (prompt: string) => { 
+    const selectedIds = state.selectedElementIds; 
+    const elementsToMerge = state.elements.filter((el): el is ImageElement => 
+      selectedIds.includes(el.id) && el.type === 'image'
+    ); 
+    if (elementsToMerge.length < 2) return; 
+    setGlobalIsLoading(true); 
+    dispatch({ 
+      type: 'UPDATE_ELEMENTS', 
+      payload: { 
+        updates: selectedIds.map(id => ({ id, changes: { isLoading: true } })) 
+      }
+    }); 
+    try { 
+      const imageUrls = elementsToMerge.map(el => el.src); 
+      const newImageSrc = await geminiService.mergeImages(imageUrls, prompt); 
+      const img = new Image(); 
+      img.onload = () => { 
+        const nextZIndex = state.elements.length > 0 ? 
+          Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1; 
+        const newEl: ImageElement = { 
+          id: crypto.randomUUID(), 
+          type: 'image', 
+          parentId: null, 
+          src: newImageSrc, 
+          x: elementsToMerge[0].x, 
+          y: elementsToMerge[0].y, 
+          width: img.width > 768 ? 768 : img.width, 
+          height: img.height > 768 ? (768 * img.height/img.width) : img.height, 
+          rotation: 0, 
+          zIndex: nextZIndex 
+        }; 
+        dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }); 
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newEl] }}); 
+      }; 
+      img.src = newImageSrc; 
+    } catch (error) { 
+      console.error("Image merge failed:", error); 
+      alert("Sorry, image merge failed. Please try again."); 
+      dispatch({ 
+        type: 'UPDATE_ELEMENTS', 
+        payload: { 
+          updates: selectedIds.map(id => ({ id, changes: { isLoading: false } })) 
+        }
+      }); 
+    } finally { 
+      setGlobalIsLoading(false); 
+    } 
+  };
+
+  // Add missing handler functions
+  const handleBringToFront = useCallback(() => dispatch({ type: 'BRING_TO_FRONT' }), [dispatch]);
+  const handleSendToBack = useCallback(() => dispatch({ type: 'SEND_TO_BACK' }), [dispatch]);
+  const handleDuplicate = useCallback(() => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }), [dispatch]);
+  const handleDelete = useCallback(() => dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }), [dispatch]);
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      setView(v => ({ ...v, zoom: Math.max(0.1, Math.min(3, v.zoom + delta)) }));
+    }
+  }, []);
+  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  }, []);
+
+  const handleElementContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      const screenPos = { x: e.clientX, y: e.clientY };
+      const worldPos = screenToWorld(screenPos);
+      
+      const currentElement = state.elements.find(el => isPointInElement(worldPos, el));
+      if (!currentElement) return;
+      
+      if (!state.selectedElementIds.includes(currentElement.id)) {
+        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [currentElement.id], shiftKey: false } });
+      }
+
+      const items: ContextMenuItem[] = [
+        { label: 'Edit with AI', action: () => {
+            setAiEditPromptBar({ isOpen: true, elementToEdit: currentElement });
+          }, icon: <Wand2 size={16}/> },
+        ...(currentElement.type === 'image' ? [
+          { label: 'Auto-Style Product Photo', action: () => setAutoStyleModal({ isOpen: true, elementToStyle: currentElement }), icon: <Camera size={16}/> },
+          { label: 'Expand Image', action: () => setExpandingElementId(currentElement.id), icon: <Maximize size={16}/> }
+        ] : []),
+        { label: 'Bring to Front', action: handleBringToFront, icon: <BringToFront size={16}/> },
+        { label: 'Send to Back', action: handleSendToBack, icon: <SendToBack size={16}/> },
+        { label: 'Duplicate', action: handleDuplicate, icon: <Copy size={16} /> },
+        { label: 'Delete', action: handleDelete, icon: <Trash2 size={16} /> },
+      ];
+      setContextMenu({ x: e.clientX, y: e.clientY, items });
+  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete, screenToWorld]);
+
+  const handleAiEditSubmit = async (prompt: string) => {
+      const { elementToEdit } = aiEditPromptBar;
+      if (!elementToEdit) return;
+      
+      const elementId = elementToEdit.id;
+      setAiEditPromptBar({ isOpen: false, elementToEdit: null });
+      setGlobalIsLoading(true);
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
+
+      try {
+        // For now, we'll just use the element's src directly
+        // In a more complete implementation, we'd rasterize the element
+        let imageSrc = '';
+        if (elementToEdit.type === 'image') {
+          imageSrc = elementToEdit.src;
+        }
+        
+        const newImageSrc = await geminiService.editImageGlobally(imageSrc, prompt);
+        
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+            const originalElement = state.elements.find(el => el.id === elementId)!;
+            const newImageElement: ImageElement = { 
+                ...originalElement, 
+                type: 'image', 
+                id: crypto.randomUUID(), 
+                src: newImageSrc, 
+                width: img.width, 
+                height: img.height, 
+                isLoading: false 
+            };
+            dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
+            dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false }});
+        };
+        img.src = newImageSrc;
+
+      } catch (error) {
+        console.error("AI edit failed:", error); 
+        alert(`Sorry, the AI edit failed. ${error}`);
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: false }}] }});
+      } finally {
+        setGlobalIsLoading(false);
+      }
+  };
+
+  // New function for auto-styling product photos
+  const handleAutoStyleSubmit = async (prompt: string) => {
+    const { elementToStyle } = autoStyleModal;
+    if (!elementToStyle || elementToStyle.type !== 'image') return;
+    
+    const elementId = elementToStyle.id;
+    setAutoStyleModal({ isOpen: false, elementToStyle: null });
+    setGlobalIsLoading(true);
+    dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
+
+    try {
+      const imageData = elementToStyle.src;
+      const newImageSrc = await geminiService.autoStyleProductPhoto(imageData, prompt);
+      
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const newImageElement: ImageElement = {
+          id: crypto.randomUUID(),
+          type: 'image',
+          src: newImageSrc,
+          parentId: elementToStyle.parentId,
+          x: elementToStyle.x,
+          y: elementToStyle.y,
+          width: img.width,
+          height: img.height,
+          rotation: elementToStyle.rotation,
+          zIndex: elementToStyle.zIndex + 1,
+          isLoading: false
+        };
+        
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
+        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false } });
+      };
+      img.src = newImageSrc;
+
+    } catch (error) {
+      console.error("Auto-style failed:", error);
+      alert(`Sorry, the auto-styling failed. ${error instanceof Error ? error.message : 'Unknown error'}`);
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: false }}] }});
+    } finally {
+      setGlobalIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if ((e.target as HTMLElement).tagName.match(/INPUT|TEXTAREA/)) return;
+      if (e.key === ' ' && !e.repeat) { setIsSpacePressed(true); }
+      if (e.key === 'Escape') { 
+        if(interactionRef.current?.type === 'brushing') { interactionRef.current = null; }
+        setActiveTool(Tool.Select);
+        if (expandingElementId) setExpandingElementId(null);
+        if (editingElementId) setEditingElementId(null);
+      }
+      if(e.key === 'Backspace') { handleDelete(); } 
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
+    };
+    const handleKeyUp = (e: globalThis.KeyboardEvent) => { if (e.key === ' ') { setIsSpacePressed(false); } };
+    window.addEventListener('keydown', handleKeyDown); window.addEventListener('keyup', handleKeyUp);
+    return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); }
+  }, [handleDelete, undo, activeTool, expandingElementId, editingElementId, setActiveTool]);
+  
+  useEffect(() => { if(uploadTrigger > 0) fileInputRef.current?.click(); }, [uploadTrigger]);
+  useEffect(() => { 
+    if (activeTool !== Tool.Brush) { 
+        if (brushState && document.body.contains(brushState.maskCanvas)) {
+            document.body.removeChild(brushState.maskCanvas); 
+        }
+        setBrushState(null); 
+    }
+    if (activeTool !== Tool.Select) {
+      setExpandingElementId(null);
+      setEditingElementId(null);
+    }
+  }, [activeTool, brushState]);
+
+  // Add this useEffect to clear brush when navigating away from canvas
+  useEffect(() => {
+    return () => {
+      // Cleanup function that runs when component unmounts
+      if (brushState && document.body.contains(brushState.maskCanvas)) {
+        document.body.removeChild(brushState.maskCanvas);
+      }
+      setBrushState(null);
+    };
+  }, [brushState]);
+
+  const showGenerateBar = activeTool === Tool.Generate;
+  const showMergeBar = activeTool === Tool.Merge && state.selectedElementIds.filter(id => state.elements.find(el => el.id === id)?.type === 'image').length > 1;
+  const showBrushBar = activeTool === Tool.Brush && brushState !== null;
+  const cursorStyle = isSpacePressed || activeTool === Tool.Hand ? 'grab' : CURSOR_MAP[activeTool] || 'default';
+
+  return (
+    <div className="w-full h-full relative overflow-hidden" ref={canvasRef}
+      onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      onWheel={handleWheel}
+      onContextMenu={handleElementContextMenu}
+      style={{ cursor: cursorStyle }}
+    >
+      <input type="file" ref={fileInputRef} onChange={handleFileChange} multiple accept="image/*" className="hidden" />
+      <canvas
+        ref={htmlCanvasRef}
+        className="w-full h-full"
+      />
+      <button onClick={(e) => { e.preventDefault(); undo(); }} disabled={!canUndo} className="absolute top-6 left-24 z-20 p-3 rounded-lg bg-white/5 backdrop-blur-xl border border-white/10 text-white/80 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition-all" title="Undo (Ctrl+Z)"><Undo size={20} /></button>
+      {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
+      
+      {showGenerateBar && <AIPromptBar onSubmit={handleAIGenerate} placeholder="A futuristic cityscape at sunset..." buttonText="Generate" isLoading={globalIsLoading} />}
+      {showMergeBar && <AIPromptBar onSubmit={handleAIMerge} placeholder="Merge images into a surreal collage..." buttonText="Merge" isLoading={globalIsLoading} />}
+      {showBrushBar && <AIPromptBar onSubmit={handleBrushSubmit} placeholder="Describe the edit for the selected area..." buttonText="Apply Edit" isLoading={globalIsLoading} />}
+      <PromptModal 
+        isOpen={aiEditPromptBar.isOpen} 
+        onClose={() => {
+          setAiEditPromptBar({isOpen: false, elementToEdit: null});
+        }} 
+        onSubmit={handleAiEditSubmit} 
+        isLoading={globalIsLoading} 
+      />
+      <AutoStyleModal
+        isOpen={autoStyleModal.isOpen}
+        onClose={() => setAutoStyleModal({ isOpen: false, elementToStyle: null })}
+        onSubmit={handleAutoStyleSubmit}
+        isLoading={globalIsLoading}
+      />
+    </div>
+  );
+};
+
+export default HtmlCanvas;
