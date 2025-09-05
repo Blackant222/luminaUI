@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, ChangeEvent } from 'react';
 import { Undo, Wand2, Camera, Maximize } from 'lucide-react';
-import { Tool, CanvasElement, ImageElement, Point, ContextMenuItem, CanvasState, CanvasAction } from '../types';
+import { Tool, CanvasElement, ImageElement, Point, ContextMenuItem, CanvasState, CanvasAction, FrameElement, TextElement, ShapeElement, DrawingElement } from '../types';
 import { CURSOR_MAP } from '../constants';
 import * as geminiService from '../services/geminiService';
 import AIPromptBar from './AIPromptBar';
@@ -34,6 +34,8 @@ type Interaction =
   | { type: 'move', startViewX: number, startViewY: number, originalElements: CanvasElement[] }
   | { type: 'resize', handle: string, startX: number, startY: number, originalElement: CanvasElement }
   | { type: 'expand', handle: string, startX: number, startY: number, originalElement: ImageElement }
+  | { type: 'draw', elementType: 'frame' | 'shape' | 'text' | 'drawing', shapeType?: ShapeElement['shapeType'], startX: number, startY: number, elementId: string, parentId: string | null, drawMode: 'corner' | 'center' | 'line', points?: Point[] }
+  | { type: 'pen', points: Point[], elementId: string, parentId: string | null }
   | null;
 
 const isPointInElement = (point: Point, element: CanvasElement) => {
@@ -43,6 +45,30 @@ const isPointInElement = (point: Point, element: CanvasElement) => {
       point.y >= element.y &&
       point.y <= element.y + element.height
     );
+};
+
+const getPolygonPoints = (centerX: number, centerY: number, radius: number, sides: number) => {
+    const points = [];
+    for (let i = 0; i < sides; i++) {
+        points.push({
+            x: centerX + radius * Math.cos(2 * Math.PI * i / sides - Math.PI / 2),
+            y: centerY + radius * Math.sin(2 * Math.PI * i / sides - Math.PI / 2),
+        });
+    }
+    return points;
+};
+
+const getStarPoints = (centerX: number, centerY: number, outerRadius: number, innerRadius: number, points: number) => {
+    const starPoints = [];
+    const angle = Math.PI / points;
+    for (let i = 0; i < 2 * points; i++) {
+        const radius = i % 2 === 0 ? outerRadius : innerRadius;
+        starPoints.push({
+            x: centerX + radius * Math.cos(i * angle - Math.PI / 2),
+            y: centerY + radius * Math.sin(i * angle - Math.PI / 2),
+        });
+    }
+    return starPoints;
 };
 
 type CanvasProps = {
@@ -71,6 +97,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
   const [aiEditPromptBar, setAiEditPromptBar] = useState<AiEditPromptBarState>({ isOpen: false, elementToEdit: null });
   const [autoStyleModal, setAutoStyleModal] = useState<AutoStyleModalState>({ isOpen: false, elementToStyle: null });
   const [expandingElementId, setExpandingElementId] = useState<string | null>(null);
+  const [editingTextElementId, setEditingTextElementId] = useState<string | null>(null);
 
   const screenToWorld = useCallback((screenPoint: Point): Point => {
     return {
@@ -115,20 +142,89 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Draw all elements
-    state.elements.forEach(element => {
+    // Draw grid background
+    ctx.save();
+    ctx.translate(view.pan.x, view.pan.y);
+    ctx.scale(view.zoom, view.zoom);
+    
+    // Draw grid
+    const gridSize = 20;
+    const minX = -view.pan.x / view.zoom;
+    const minY = -view.pan.y / view.zoom;
+    const maxX = (canvas.width - view.pan.x) / view.zoom;
+    const maxY = (canvas.height - view.pan.y) / view.zoom;
+    
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.lineWidth = 1 / view.zoom;
+    
+    // Vertical lines
+    for (let x = Math.floor(minX / gridSize) * gridSize; x <= maxX; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, minY);
+      ctx.lineTo(x, maxY);
+      ctx.stroke();
+    }
+    
+    // Horizontal lines
+    for (let y = Math.floor(minY / gridSize) * gridSize; y <= maxY; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(minX, y);
+      ctx.lineTo(maxX, y);
+      ctx.stroke();
+    }
+    
+    ctx.restore();
+    
+    // Draw all elements (sorted by zIndex)
+    const sortedElements = [...state.elements].sort((a, b) => a.zIndex - b.zIndex);
+    
+    sortedElements.forEach(element => {
       switch (element.type) {
+        case 'frame':
+          ctx.save();
+          ctx.translate(view.pan.x, view.pan.y);
+          ctx.scale(view.zoom, view.zoom);
+          
+          // Draw frame background
+          ctx.fillStyle = element.backgroundColor;
+          ctx.fillRect(element.x, element.y, element.width, element.height);
+          
+          // Draw frame border
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+          ctx.lineWidth = 1 / view.zoom;
+          ctx.strokeRect(element.x, element.y, element.width, element.height);
+          
+          // Draw selection outline if selected
+          if (state.selectedElementIds.includes(element.id)) {
+            ctx.strokeStyle = '#6D35FF';
+            ctx.lineWidth = 2 / view.zoom;
+            ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
+            ctx.strokeRect(element.x, element.y, element.width, element.height);
+            ctx.setLineDash([]);
+          }
+          
+          ctx.restore();
+          break;
+          
         case 'image':
           loadImage(element.src).then(img => {
             ctx.save();
+            ctx.translate(view.pan.x, view.pan.y);
+            ctx.scale(view.zoom, view.zoom);
+            
+            // Draw image
             ctx.translate(element.x, element.y);
             ctx.rotate(element.rotation * Math.PI / 180);
             ctx.drawImage(img, 0, 0, element.width, element.height);
+            
             ctx.restore();
             
             // If this is the expanding element, draw expansion handles
             if (expandingElementId === element.id) {
               ctx.save();
+              ctx.translate(view.pan.x, view.pan.y);
+              ctx.scale(view.zoom, view.zoom);
+              
               ctx.strokeStyle = '#6D35FF';
               ctx.lineWidth = 2 / view.zoom;
               ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
@@ -136,14 +232,14 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
               // Draw expansion handles
               const handleSize = 8 / view.zoom;
               const handles = [
-                { x: -handleSize, y: -handleSize }, // top-left
-                { x: element.width / 2 - handleSize / 2, y: -handleSize }, // top-center
-                { x: element.width - handleSize, y: -handleSize }, // top-right
-                { x: element.width - handleSize, y: element.height / 2 - handleSize / 2 }, // right-center
-                { x: element.width - handleSize, y: element.height - handleSize }, // bottom-right
-                { x: element.width / 2 - handleSize / 2, y: element.height - handleSize }, // bottom-center
-                { x: -handleSize, y: element.height - handleSize }, // bottom-left
-                { x: -handleSize, y: element.height / 2 - handleSize / 2 }, // left-center
+                { x: element.x - handleSize/2, y: element.y - handleSize/2 }, // top-left
+                { x: element.x + element.width/2 - handleSize/2, y: element.y - handleSize/2 }, // top-center
+                { x: element.x + element.width - handleSize/2, y: element.y - handleSize/2 }, // top-right
+                { x: element.x + element.width - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // right-center
+                { x: element.x + element.width - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-right
+                { x: element.x + element.width/2 - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-center
+                { x: element.x - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-left
+                { x: element.x - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // left-center
               ];
               
               handles.forEach(handle => {
@@ -158,14 +254,159 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
             console.error("Failed to load image:", err);
           });
           break;
+          
         case 'text':
           ctx.save();
+          ctx.translate(view.pan.x, view.pan.y);
+          ctx.scale(view.zoom, view.zoom);
+          
+          // Draw text
           ctx.font = `${element.fontSize}px ${element.fontFamily}`;
           ctx.fillStyle = element.color;
           ctx.fillText(element.content, element.x, element.y + element.fontSize);
+          
+          // Draw selection outline if selected
+          if (state.selectedElementIds.includes(element.id) && editingTextElementId !== element.id) {
+            const textWidth = ctx.measureText(element.content).width;
+            const textHeight = element.fontSize;
+            
+            ctx.strokeStyle = '#6D35FF';
+            ctx.lineWidth = 2 / view.zoom;
+            ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
+            ctx.strokeRect(element.x, element.y, textWidth, textHeight);
+            ctx.setLineDash([]);
+          }
+          
           ctx.restore();
           break;
-        // Add other element types as needed
+          
+        case 'shape':
+          ctx.save();
+          ctx.translate(view.pan.x, view.pan.y);
+          ctx.scale(view.zoom, view.zoom);
+          
+          const { shapeType, strokeColor, strokeWidth, fillColor, flipHorizontal, flipVertical } = element;
+          const halfStroke = strokeWidth / 2;
+          
+          ctx.translate(element.x, element.y);
+          ctx.rotate(element.rotation * Math.PI / 180);
+          
+          switch (shapeType) {
+            case 'rectangle':
+              ctx.fillStyle = fillColor;
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = strokeWidth;
+              ctx.fillRect(0, 0, element.width, element.height);
+              ctx.strokeRect(0, 0, element.width, element.height);
+              break;
+              
+            case 'ellipse':
+              ctx.fillStyle = fillColor;
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = strokeWidth;
+              ctx.beginPath();
+              ctx.ellipse(element.width/2, element.height/2, element.width/2, element.height/2, 0, 0, 2 * Math.PI);
+              ctx.fill();
+              ctx.stroke();
+              break;
+              
+            case 'line':
+              const lineX1 = flipHorizontal ? element.width : 0;
+              const lineY1 = flipVertical ? element.height : 0;
+              const lineX2 = flipHorizontal ? 0 : element.width;
+              const lineY2 = flipVertical ? 0 : element.height;
+              
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = strokeWidth;
+              ctx.beginPath();
+              ctx.moveTo(lineX1, lineY1);
+              ctx.lineTo(lineX2, lineY2);
+              ctx.stroke();
+              break;
+              
+            case 'arrow':
+              const arrowX1 = flipHorizontal ? element.width : 0;
+              const arrowY1 = flipVertical ? element.height : 0;
+              const arrowX2 = flipHorizontal ? 0 : element.width;
+              const arrowY2 = flipVertical ? 0 : element.height;
+              
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = strokeWidth;
+              ctx.beginPath();
+              ctx.moveTo(arrowX1, arrowY1);
+              ctx.lineTo(arrowX2, arrowY2);
+              ctx.stroke();
+              
+              // Draw arrowhead
+              const angle = Math.atan2(arrowY2 - arrowY1, arrowX2 - arrowX1);
+              const headLength = 10;
+              
+              ctx.beginPath();
+              ctx.moveTo(arrowX2, arrowY2);
+              ctx.lineTo(arrowX2 - headLength * Math.cos(angle - Math.PI/6), arrowY2 - headLength * Math.sin(angle - Math.PI/6));
+              ctx.moveTo(arrowX2, arrowY2);
+              ctx.lineTo(arrowX2 - headLength * Math.cos(angle + Math.PI/6), arrowY2 - headLength * Math.sin(angle + Math.PI/6));
+              ctx.stroke();
+              break;
+              
+            case 'polygon':
+              ctx.fillStyle = fillColor;
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = strokeWidth;
+              ctx.beginPath();
+              const polygonPoints = getPolygonPoints(element.width/2, element.height/2, Math.min(element.width, element.height)/2, 6);
+              ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+              for (let i = 1; i < polygonPoints.length; i++) {
+                ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+              }
+              ctx.closePath();
+              ctx.fill();
+              ctx.stroke();
+              break;
+              
+            case 'star':
+              ctx.fillStyle = fillColor;
+              ctx.strokeStyle = strokeColor;
+              ctx.lineWidth = strokeWidth;
+              ctx.beginPath();
+              const starPoints = getStarPoints(element.width/2, element.height/2, Math.min(element.width, element.height)/2, Math.min(element.width, element.height)/4, 5);
+              ctx.moveTo(starPoints[0].x, starPoints[0].y);
+              for (let i = 1; i < starPoints.length; i++) {
+                ctx.lineTo(starPoints[i].x, starPoints[i].y);
+              }
+              ctx.closePath();
+              ctx.fill();
+              ctx.stroke();
+              break;
+          }
+          
+          // Draw selection outline if selected
+          if (state.selectedElementIds.includes(element.id)) {
+            ctx.strokeStyle = '#6D35FF';
+            ctx.lineWidth = 2 / view.zoom;
+            ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
+            ctx.strokeRect(-halfStroke, -halfStroke, element.width + strokeWidth, element.height + strokeWidth);
+            ctx.setLineDash([]);
+          }
+          
+          ctx.restore();
+          break;
+          
+        case 'drawing':
+          ctx.save();
+          ctx.translate(view.pan.x, view.pan.y);
+          ctx.scale(view.zoom, view.zoom);
+          
+          // Draw SVG path
+          const path = new Path2D(element.d);
+          ctx.strokeStyle = element.strokeColor;
+          ctx.lineWidth = element.strokeWidth;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke(path);
+          
+          ctx.restore();
+          break;
       }
     });
     
@@ -186,7 +427,39 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         ctx.stroke();
       });
     }
-  }, [state.elements, brushState, loadImage, expandingElementId, view.zoom]);
+    
+    // Draw current drawing if in drawing mode
+    const currentInteraction = interactionRef.current;
+    if (currentInteraction && (currentInteraction.type === 'draw' || currentInteraction.type === 'pen')) {
+      if (currentInteraction.type === 'draw' && currentInteraction.points && currentInteraction.points.length > 1) {
+        ctx.beginPath();
+        const firstPoint = currentInteraction.points[0];
+        ctx.moveTo(firstPoint.x, firstPoint.y);
+        for (let i = 1; i < currentInteraction.points.length; i++) {
+          const point = currentInteraction.points[i];
+          ctx.lineTo(point.x, point.y);
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      } else if (currentInteraction.type === 'pen' && currentInteraction.points && currentInteraction.points.length > 1) {
+        ctx.beginPath();
+        const firstPoint = currentInteraction.points[0];
+        ctx.moveTo(firstPoint.x, firstPoint.y);
+        for (let i = 1; i < currentInteraction.points.length; i++) {
+          const point = currentInteraction.points[i];
+          ctx.lineTo(point.x, point.y);
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+      }
+    }
+  }, [state.elements, state.selectedElementIds, brushState, loadImage, expandingElementId, view, color, editingTextElementId]);
 
   // Initialize canvas
   useEffect(() => {
@@ -280,14 +553,14 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         // Check if click is on an expansion handle
         const handleSize = 8 / view.zoom;
         const handles = [
-          { x: expandingElement.x - handleSize, y: expandingElement.y - handleSize, handle: 'top-left' },
-          { x: expandingElement.x + expandingElement.width / 2 - handleSize / 2, y: expandingElement.y - handleSize, handle: 'top-center' },
-          { x: expandingElement.x + expandingElement.width - handleSize, y: expandingElement.y - handleSize, handle: 'top-right' },
-          { x: expandingElement.x + expandingElement.width - handleSize, y: expandingElement.y + expandingElement.height / 2 - handleSize / 2, handle: 'right-center' },
-          { x: expandingElement.x + expandingElement.width - handleSize, y: expandingElement.y + expandingElement.height - handleSize, handle: 'bottom-right' },
-          { x: expandingElement.x + expandingElement.width / 2 - handleSize / 2, y: expandingElement.y + expandingElement.height - handleSize, handle: 'bottom-center' },
-          { x: expandingElement.x - handleSize, y: expandingElement.y + expandingElement.height - handleSize, handle: 'bottom-left' },
-          { x: expandingElement.x - handleSize, y: expandingElement.y + expandingElement.height / 2 - handleSize / 2, handle: 'left-center' },
+          { x: expandingElement.x - handleSize/2, y: expandingElement.y - handleSize/2, handle: 'top-left' },
+          { x: expandingElement.x + expandingElement.width/2 - handleSize/2, y: expandingElement.y - handleSize/2, handle: 'top-center' },
+          { x: expandingElement.x + expandingElement.width - handleSize/2, y: expandingElement.y - handleSize/2, handle: 'top-right' },
+          { x: expandingElement.x + expandingElement.width - handleSize/2, y: expandingElement.y + expandingElement.height/2 - handleSize/2, handle: 'right-center' },
+          { x: expandingElement.x + expandingElement.width - handleSize/2, y: expandingElement.y + expandingElement.height - handleSize/2, handle: 'bottom-right' },
+          { x: expandingElement.x + expandingElement.width/2 - handleSize/2, y: expandingElement.y + expandingElement.height - handleSize/2, handle: 'bottom-center' },
+          { x: expandingElement.x - handleSize/2, y: expandingElement.y + expandingElement.height - handleSize/2, handle: 'bottom-left' },
+          { x: expandingElement.x - handleSize/2, y: expandingElement.y + expandingElement.height/2 - handleSize/2, handle: 'left-center' },
         ];
         
         for (const handle of handles) {
@@ -310,8 +583,130 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       }
     }
     
+    // Handle drawing tools
+    const drawingTools = [Tool.Frame, Tool.Rectangle, Tool.Ellipse, Tool.Line, Tool.Arrow, Tool.Polygon, Tool.Star, Tool.Pen, Tool.Text];
+    if (drawingTools.includes(activeTool)) {
+      // Check if we're clicking inside a frame for tools that require a frame
+      const frameTools = [Tool.Pen, Tool.Text];
+      const clickedFrame = state.elements.find(el => el.type === 'frame' && isPointInElement(worldPos, el)) as FrameElement | undefined;
+      
+      if (frameTools.includes(activeTool) && !clickedFrame) {
+        // These tools require a frame
+        return;
+      }
+      
+      const parentId = clickedFrame ? clickedFrame.id : null;
+      
+      // Create new element based on tool
+      let newElement: CanvasElement;
+      const elementId = crypto.randomUUID();
+      
+      switch (activeTool) {
+        case Tool.Frame:
+          newElement = {
+            id: elementId,
+            type: 'frame',
+            parentId: null,
+            x: worldPos.x,
+            y: worldPos.y,
+            width: 0,
+            height: 0,
+            rotation: 0,
+            zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
+            backgroundColor: 'rgba(0, 0, 0, 0.1)'
+          } as FrameElement;
+          break;
+          
+        case Tool.Text:
+          newElement = {
+            id: elementId,
+            type: 'text',
+            parentId,
+            x: worldPos.x,
+            y: worldPos.y,
+            width: 100,
+            height: 30,
+            rotation: 0,
+            zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
+            content: 'Text',
+            fontSize: 20,
+            color: color,
+            fontFamily: 'Arial'
+          } as TextElement;
+          break;
+          
+        case Tool.Pen:
+          interactionRef.current = {
+            type: 'pen',
+            points: [worldPos],
+            elementId,
+            parentId
+          };
+          return;
+          
+        default:
+          // Shape tools
+          let shapeType: ShapeElement['shapeType'] = 'rectangle';
+          switch (activeTool) {
+            case Tool.Rectangle: shapeType = 'rectangle'; break;
+            case Tool.Ellipse: shapeType = 'ellipse'; break;
+            case Tool.Line: shapeType = 'line'; break;
+            case Tool.Arrow: shapeType = 'arrow'; break;
+            case Tool.Polygon: shapeType = 'polygon'; break;
+            case Tool.Star: shapeType = 'star'; break;
+          }
+          
+          newElement = {
+            id: elementId,
+            type: 'shape',
+            parentId,
+            x: worldPos.x,
+            y: worldPos.y,
+            width: 0,
+            height: 0,
+            rotation: 0,
+            zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
+            shapeType,
+            strokeColor: color,
+            strokeWidth: 2,
+            fillColor: 'transparent',
+            flipHorizontal: false,
+            flipVertical: false
+          } as ShapeElement;
+      }
+      
+      // For frame and shape tools, start drawing interaction
+      if (activeTool === Tool.Frame || 
+          [Tool.Rectangle, Tool.Ellipse, Tool.Line, Tool.Arrow, Tool.Polygon, Tool.Star].includes(activeTool)) {
+        interactionRef.current = {
+          type: 'draw',
+          elementType: activeTool === Tool.Frame ? 'frame' : 'shape',
+          shapeType: activeTool !== Tool.Frame ? (newElement as ShapeElement).shapeType : undefined,
+          startX: worldPos.x,
+          startY: worldPos.y,
+          elementId,
+          parentId,
+          drawMode: 'corner'
+        };
+        return;
+      }
+      
+      // For text tool, add element immediately and start editing
+      if (activeTool === Tool.Text) {
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newElement] } });
+        setEditingTextElementId(elementId);
+        redrawCanvas();
+        return;
+      }
+      
+      return;
+    }
+    
     // Handle element selection
-    const clickedElement = state.elements.find(el => isPointInElement(worldPos, el));
+    // Find elements in reverse order (topmost first)
+    const sortedElements = [...state.elements].sort((a, b) => b.zIndex - a.zIndex);
+    const clickedElement = sortedElements.find(el => isPointInElement(worldPos, el));
+    
     if (clickedElement) {
       if (!state.selectedElementIds.includes(clickedElement.id)) {
         dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
@@ -334,8 +729,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     } else {
       // Clicked on empty space, clear selection
       dispatch({ type: 'CLEAR_SELECTION' });
+      setEditingTextElementId(null);
     }
-  }, [activeTool, dispatch, isSpacePressed, view, screenToWorld, state.elements, state.selectedElementIds, brushState, expandingElementId]);
+  }, [activeTool, dispatch, isSpacePressed, view, screenToWorld, state.elements, state.selectedElementIds, brushState, expandingElementId, color]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const screenPos = { x: e.clientX, y: e.clientY };
@@ -350,6 +746,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         currentStroke.push(screenPos);
         ctx.lineTo(screenPos.x, screenPos.y);
         ctx.stroke();
+        redrawCanvas();
         return;
     }
     
@@ -372,6 +769,27 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     if (currentInteraction.type === 'expand' && expandingElementId) {
       // Visual feedback for expansion
       redrawCanvas();
+      return;
+    }
+    
+    if (currentInteraction.type === 'draw') {
+      // Update element size as we drag
+      const { startX, startY } = currentInteraction;
+      const width = Math.abs(worldPos.x - startX);
+      const height = Math.abs(worldPos.y - startY);
+      const x = Math.min(worldPos.x, startX);
+      const y = Math.min(worldPos.y, startY);
+      
+      // Update the element being drawn
+      redrawCanvas();
+      return;
+    }
+    
+    if (currentInteraction.type === 'pen') {
+      // Add point to pen drawing
+      currentInteraction.points.push(worldPos);
+      redrawCanvas();
+      return;
     }
   }, [dispatch, brushState, screenToWorld, redrawCanvas, expandingElementId]);
 
@@ -466,12 +884,97 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       }
       
       interactionRef.current = null;
+      redrawCanvas();
+      return;
+    }
+    
+    if (currentInteraction.type === 'draw') {
+      const { elementType, shapeType, startX, startY, elementId, parentId } = currentInteraction;
+      const worldPos = screenToWorld({ x: e.clientX, y: e.clientY });
+      const width = Math.abs(worldPos.x - startX);
+      const height = Math.abs(worldPos.y - startY);
+      const x = Math.min(worldPos.x, startX);
+      const y = Math.min(worldPos.y, startY);
+      
+      // Create the element
+      let newElement: CanvasElement;
+      
+      if (elementType === 'frame') {
+        newElement = {
+          id: elementId,
+          type: 'frame',
+          parentId: null,
+          x,
+          y,
+          width: Math.max(10, width),
+          height: Math.max(10, height),
+          rotation: 0,
+          zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
+          backgroundColor: 'rgba(0, 0, 0, 0.1)'
+        } as FrameElement;
+      } else {
+        newElement = {
+          id: elementId,
+          type: 'shape',
+          parentId,
+          x,
+          y,
+          width: Math.max(10, width),
+          height: Math.max(10, height),
+          rotation: 0,
+          zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
+          shapeType: shapeType!,
+          strokeColor: color,
+          strokeWidth: 2,
+          fillColor: 'transparent',
+          flipHorizontal: false,
+          flipVertical: false
+        } as ShapeElement;
+      }
+      
+      dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newElement] } });
+      redrawCanvas();
+      interactionRef.current = null;
+      return;
+    }
+    
+    if (currentInteraction.type === 'pen') {
+      const { points, elementId, parentId } = currentInteraction;
+      
+      // Create SVG path from points
+      if (points.length > 1) {
+        let d = `M ${points[0].x} ${points[0].y}`;
+        for (let i = 1; i < points.length; i++) {
+          d += ` L ${points[i].x} ${points[i].y}`;
+        }
+        
+        const newElement: DrawingElement = {
+          id: elementId,
+          type: 'drawing',
+          parentId,
+          x: Math.min(...points.map(p => p.x)),
+          y: Math.min(...points.map(p => p.y)),
+          width: Math.max(...points.map(p => p.x)) - Math.min(...points.map(p => p.x)),
+          height: Math.max(...points.map(p => p.y)) - Math.min(...points.map(p => p.y)),
+          rotation: 0,
+          zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
+          points,
+          strokeColor: color,
+          strokeWidth: 2,
+          d
+        };
+        
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newElement] } });
+        redrawCanvas();
+      }
+      
+      interactionRef.current = null;
       return;
     }
 
     interactionRef.current = null;
     redrawCanvas();
-  }, [brushState, expandingElementId, view.zoom, dispatch]);
+  }, [brushState, expandingElementId, view.zoom, dispatch, screenToWorld, state.elements, color, redrawCanvas]);
 
   const handleBrushSubmit = async (prompt: string) => {
     if (!brushState) return;
@@ -688,16 +1191,15 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       redrawCanvas();
     }
   }, [redrawCanvas]);
-  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-  }, []);
-
+  
   const handleElementContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
       e.preventDefault();
       const screenPos = { x: e.clientX, y: e.clientY };
       const worldPos = screenToWorld(screenPos);
       
-      const currentElement = state.elements.find(el => isPointInElement(worldPos, el));
+      // Find elements in reverse order (topmost first)
+      const sortedElements = [...state.elements].sort((a, b) => b.zIndex - a.zIndex);
+      const currentElement = sortedElements.find(el => isPointInElement(worldPos, el));
       if (!currentElement) return;
       
       if (!state.selectedElementIds.includes(currentElement.id)) {
@@ -821,6 +1323,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         if(interactionRef.current?.type === 'brushing') { interactionRef.current = null; }
         setActiveTool(Tool.Select);
         if (expandingElementId) setExpandingElementId(null);
+        setEditingTextElementId(null);
       }
       if(e.key === 'Backspace') { handleDelete(); } 
       else if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
