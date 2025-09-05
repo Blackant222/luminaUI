@@ -148,6 +148,32 @@ export const editImageGlobally = async (
 
 export const editImageWithTextPrompt = editImageGlobally;
 
+export const editImageWithPrompt = async (
+  base64ImageData: string,
+  prompt: string
+): Promise<string> => {
+  console.log(`Editing image with prompt: "${prompt}"`);
+  
+  try {
+    console.log("Calling edit-image-with-prompt function with image and prompt");
+    const { data, error } = await supabase.functions.invoke('edit-image-with-prompt', {
+      body: { 
+        image: base64ImageData,
+        prompt 
+      },
+    });
+    console.log("Function response - data:", data, "error:", error);
+
+    if (error) throw error;
+    if (!data.success) throw new Error(data.error || "Failed to edit image with prompt");
+
+    return data.image || data.response;
+  } catch (error) {
+    console.error("Error editing image with prompt:", error);
+    throw error;
+  }
+};
+
 export const expandImage = async (
   originalElement: ImageElement,
   newDimensions: { width: number; height: number }
