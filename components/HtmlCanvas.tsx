@@ -5,7 +5,6 @@ import { CURSOR_MAP } from '../constants';
 import * as geminiService from '../services/geminiService';
 import AIPromptBar from './AIPromptBar';
 import ContextMenu from './ContextMenu';
-import PromptModal from './PromptModal';
 import AutoStyleModal from './AutoStyleModal';
 import { BringToFront, SendToBack, Copy, Trash2 } from 'lucide-react';
 
@@ -774,6 +773,42 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
         }
       }
       
+      // If we're using the select tool, also check for resize handles on non-selected elements
+      if (activeTool === Tool.Select) {
+        // Check if click is on a resize handle
+        const handleSize = 8 / view.zoom;
+        const handles = [
+          { x: clickedElement.x - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-left' },
+          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-center' },
+          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-right' },
+          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'right-center' },
+          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-right' },
+          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-center' },
+          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-left' },
+          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'left-center' },
+        ];
+        
+        for (const handle of handles) {
+          if (
+            screenPos.x >= handle.x && 
+            screenPos.x <= handle.x + handleSize && 
+            screenPos.y >= handle.y && 
+            screenPos.y <= handle.y + handleSize
+          ) {
+            // Select the element first, then start resize interaction
+            dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
+            interactionRef.current = { 
+              type: 'resize', 
+              handle: handle.handle, 
+              startX: screenPos.x, 
+              startY: screenPos.y, 
+              originalElement: clickedElement 
+            };
+            return;
+          }
+        }
+      }
+      
       if (!state.selectedElementIds.includes(clickedElement.id)) {
         dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
       }
@@ -873,6 +908,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       // Brushing finished, show prompt bar
       interactionRef.current = null;
       setAiEditPromptBar({ isOpen: true, elementToEdit: brushState.element });
+      setActiveTool(Tool.Select);
       return;
     }
     
@@ -1547,7 +1583,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
 
   const showGenerateBar = activeTool === Tool.Generate;
   const showMergeBar = activeTool === Tool.Merge && state.selectedElementIds.filter(id => state.elements.find(el => el.id === id)?.type === 'image').length > 1;
-  const showBrushBar = aiEditPromptBar.isOpen && aiEditPromptBar.elementToEdit?.type === 'image' && brushState !== null;
+  const showBrushBar = (activeTool === Tool.Brush && brushState !== null) || (activeTool === Tool.Select && brushState !== null);
   const cursorStyle = isSpacePressed || activeTool === Tool.Hand ? 'grab' : CURSOR_MAP[activeTool] || 'default';
 
   return (
@@ -1572,14 +1608,14 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       {showGenerateBar && <AIPromptBar onSubmit={handleAIGenerate} placeholder="A futuristic cityscape at sunset..." buttonText="Generate" isLoading={globalIsLoading} />}
       {showMergeBar && <AIPromptBar onSubmit={handleAIMerge} placeholder="Merge images into a surreal collage..." buttonText="Merge" isLoading={globalIsLoading} />}
       {showBrushBar && <AIPromptBar onSubmit={handleBrushSubmit} placeholder="Describe the edit for the selected area..." buttonText="Apply Edit" isLoading={globalIsLoading} />}
-      <PromptModal 
-        isOpen={aiEditPromptBar.isOpen} 
-        onClose={() => {
-          setAiEditPromptBar({isOpen: false, elementToEdit: null});
-        }} 
-        onSubmit={handleAiEditSubmit} 
-        isLoading={globalIsLoading} 
-      />
+      {aiEditPromptBar.isOpen && (
+        <AIPromptBar 
+          onSubmit={handleAiEditSubmit} 
+          placeholder="Describe your edit..."
+          buttonText="Apply Edit"
+          isLoading={globalIsLoading} 
+        />
+      )}
       <AutoStyleModal
         isOpen={autoStyleModal.isOpen}
         onClose={() => setAutoStyleModal({ isOpen: false, elementToStyle: null })}
