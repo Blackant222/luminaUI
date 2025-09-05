@@ -674,8 +674,14 @@ const handleUpdateText = (id: string, content: string) => {
 };
 
   const handleAiEditSubmit = async (prompt: string) => {
+      console.log('AI Edit Submit called with prompt:', prompt);
+      console.log('aiEditPromptBar state:', aiEditPromptBar);
+      
       const { elementToEdit } = aiEditPromptBar;
-      if (!elementToEdit) return;
+      if (!elementToEdit) {
+        console.log('No element to edit');
+        return;
+      }
       
       const elementId = elementToEdit.id;
       setAiEditPromptBar({ isOpen: false, elementToEdit: null });
@@ -759,7 +765,13 @@ const handleUpdateText = (id: string, content: string) => {
       const hasImageAndText = selectedElements.some(el => el.type === 'image') && selectedElements.some(el => el.type === 'text');
 
       const items: ContextMenuItem[] = [
-        { label: 'Edit with AI', action: () => setAiEditPromptBar({ isOpen: true, elementToEdit: currentElement }), icon: <Wand2 size={16}/> },
+        { label: 'Edit with AI', action: () => {
+            console.log('Edit with AI clicked');
+            console.log('Current element:', currentElement);
+            console.log('Setting aiEditPromptBar to open');
+            setAiEditPromptBar({ isOpen: true, elementToEdit: currentElement });
+            console.log('aiEditPromptBar set to open');
+          }, icon: <Wand2 size={16}/> },
         ...(currentElement.type === 'image' ? [{ label: 'Expand Image', action: () => setExpandingElementId(currentElement.id), icon: <Maximize size={16}/> }] : []),
         { label: 'Bring to Front', action: handleBringToFront, icon: <BringToFront size={16}/> },
         { label: 'Send to Back', action: handleSendToBack, icon: <SendToBack size={16}/> },
@@ -767,7 +779,7 @@ const handleUpdateText = (id: string, content: string) => {
         { label: 'Delete', action: handleDelete, icon: <Trash2 size={16} /> },
       ];
       setContextMenu({ x: e.clientX, y: e.clientY, items });
-  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete]);
+  }, [state.selectedElementIds, state.elements, dispatch, handleBringToFront, handleSendToBack, handleDuplicate, handleDelete, setAiEditPromptBar]);
 
   useEffect(() => {
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
@@ -856,7 +868,15 @@ const handleUpdateText = (id: string, content: string) => {
       {showGenerateBar && <AIPromptBar onSubmit={handleAIGenerate} placeholder="A futuristic cityscape at sunset..." buttonText="Generate" isLoading={globalIsLoading} />}
       {showMergeBar && <AIPromptBar onSubmit={handleAIMerge} placeholder="Merge images into a surreal collage..." buttonText="Merge" isLoading={globalIsLoading} />}
       {showBrushBar && <AIPromptBar onSubmit={handleBrushSubmit} placeholder="Describe the edit for the selected area..." buttonText="Apply Edit" isLoading={globalIsLoading} />}
-      <PromptModal isOpen={aiEditPromptBar.isOpen} onClose={() => setAiEditPromptBar({isOpen: false, elementToEdit: null})} onSubmit={handleAiEditSubmit} isLoading={globalIsLoading} />
+      <PromptModal 
+        isOpen={aiEditPromptBar.isOpen} 
+        onClose={() => {
+          console.log('PromptModal onClose called');
+          setAiEditPromptBar({isOpen: false, elementToEdit: null});
+        }} 
+        onSubmit={handleAiEditSubmit} 
+        isLoading={globalIsLoading} 
+      />
     </div>
   );
 };

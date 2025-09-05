@@ -41,8 +41,12 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
           key={index}
           onClick={() => {
             if (item.disabled) return;
+            // Execute the action
             item.action();
-            onClose();
+            // Close the context menu after a short delay to allow UI updates
+            setTimeout(() => {
+              onClose();
+            }, 100);
           }}
           disabled={item.disabled}
           className="w-full flex items-center gap-3 text-left px-3 py-2 text-sm text-white/90 rounded-md hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 type PromptModalProps = {
   isOpen: boolean;
@@ -10,17 +10,28 @@ type PromptModalProps = {
 const PromptModal: React.FC<PromptModalProps> = ({ isOpen, onClose, onSubmit, isLoading }) => {
   const [prompt, setPrompt] = useState('');
 
+  // Log when the modal is opened or closed
+  useEffect(() => {
+    console.log('PromptModal isOpen changed to:', isOpen);
+    if (isOpen) {
+      console.log('PromptModal is now open');
+    } else {
+      console.log('PromptModal is now closed');
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    console.log('PromptModal handleSubmit called with prompt:', prompt);
     if (prompt.trim()) {
       onSubmit(prompt);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[100]" onClick={onClose}>
       <div className="w-full max-w-md bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 p-8 flex flex-col items-center gap-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-xl font-semibold text-white">Describe your edit</h2>
         <p className="text-sm text-white/70 text-center">Tell the AI what changes to make to the selected area.</p>
