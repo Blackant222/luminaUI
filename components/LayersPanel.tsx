@@ -1,6 +1,6 @@
 import React, { useState, DragEvent, useMemo, useRef, MouseEvent } from 'react';
 import { CanvasElement } from '../types';
-import { Image, Square, Pen, Type, ChevronDown, ChevronRight, ChevronsUpDown } from 'lucide-react';
+import { Image, Square, Pen, Type, ChevronDown, ChevronRight, ChevronsUpDown, GripVertical } from 'lucide-react';
 
 type LayersPanelProps = {
   elements: CanvasElement[];
@@ -62,6 +62,7 @@ const RenderLayerTree = ({
                     onDragEnd={(e) => { e.stopPropagation(); rest.onDragEnd(e); }}
                     onDrop={(e) => { e.stopPropagation(); rest.onDrop(e, node.element.id); }}
                 >
+                    <GripVertical size={16} className="text-white/50 cursor-grab" />
                     {node.children.length > 0 ? (
                         <button onClick={(e) => { e.stopPropagation(); onToggleCollapse(node.element.id); }} className="p-0.5 rounded-sm hover:bg-white/10">
                             {collapsedIds.has(node.element.id) ? <ChevronRight size={14} /> : <ChevronDown size={14} />}

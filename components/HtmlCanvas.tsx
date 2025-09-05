@@ -15,6 +15,8 @@ import {
 import { editImageWithPrompt, urlToBase64, generateImage, autoStyleProductPhoto, mergeImages, editImageWithMask } from '../services/geminiService';
 import ContextMenu from './ContextMenu';
 import { AiEditModal } from './AiEditModal';
+import AIPromptBar from './AIPromptBar';
+import AutoStyleModal from './AutoStyleModal';
 import { CURSOR_MAP, SHAPE_TOOLS } from '../constants';
 import { getSvgPathFromStroke } from '../utils/getSvgPathFromStroke';
 import getStroke from 'perfect-freehand';
@@ -85,6 +87,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; elementId: string } | null>(null);
   const [aiEditModalOpen, setAiEditModalOpen] = useState(false);
+  const [autoStyleModalOpen, setAutoStyleModalOpen] = useState(false);
+  const [promptBarConfig, setPromptBarConfig] = useState<{ onSubmit: (prompt: string) => void; placeholder: string; buttonText: string; } | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [elementToEdit, setElementToEdit] = useState<ImageElement | null>(null);
   const [resizingCorner, setResizingCorner] = useState<string | null>(null);
   const [editingTextElement, setEditingTextElement] = useState<TextElement | null>(null);
@@ -99,8 +104,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === ' ') setIsSpacePressed(true);
-      if (e.key === 'Escape' && editingTextElement) {
-        setEditingTextElement(null);
+      if (e.key === 'Escape') {
+        if (editingTextElement) setEditingTextElement(null);
+        if (promptBarConfig) setPromptBarConfig(null);
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -112,7 +118,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [editingTextElement]);
+  }, [editingTextElement, promptBarConfig]);
 
   useEffect(() => {
     elements.forEach(element => {
@@ -273,6 +279,47 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: updatedElement.id, changes: { content: e.target.value } }] } });
   };
 
+  const handleGenerateSubmit = async (prompt: string) => {
+    setIsLoading(true);
+    const worldPoint = screenToWorld({ x: window.innerWidth / 2, y: window.innerHeight / 2 }, viewState);
+    const parentFrame = getFrameAtPoint(worldPoint);
+    const newElementId = crypto.randomUUID();
+    const loadingElement: ImageElement = {
+        id: newElementId,
+        type: 'image',
+        src: '',
+        x: worldPoint.x - 150,
+        y: worldPoint.y - 150,
+        width: 300,
+        height: 300,
+        parentId: parentFrame?.id || null,
+        rotation: 0,
+        zIndex: 0,
+        isLoading: true,
+    };
+    dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [loadingElement] } });
+
+    try {
+        const newImageSrc = await generateImage(prompt);
+        const newImage = new Image();
+        newImage.src = newImageSrc;
+        newImage.onload = () => {
+            const updatedElement = {
+                src: newImage.src,
+                width: newImage.width,
+                height: newImage.height,
+                isLoading: false,
+            };
+            dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: newElementId, changes: updatedElement }] } });
+        }
+    } catch (error) {
+        console.error(error);
+        dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }); // a bit aggressive
+    }
+    setIsLoading(false);
+    setPromptBarConfig(null);
+  };
+
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (editingTextElement) return;
     const startPoint = { x: e.clientX, y: e.clientY };
@@ -319,40 +366,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     }
     
     if (activeTool === Tool.Generate) {
-        const prompt = window.prompt("Enter a prompt to generate an image:");
-        if (prompt) {
-            const worldPoint = screenToWorld({ x: window.innerWidth / 2, y: window.innerHeight / 2 }, viewState);
-            const parentFrame = getFrameAtPoint(worldPoint);
-            const newElementId = crypto.randomUUID();
-            const loadingElement: ImageElement = {
-                id: newElementId,
-                type: 'image',
-                src: '',
-                x: worldPoint.x - 150,
-                y: worldPoint.y - 150,
-                width: 300,
-                height: 300,
-                parentId: parentFrame?.id || null,
-                rotation: 0,
-                zIndex: 0,
-                isLoading: true,
-            };
-            dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [loadingElement] } });
-
-            generateImage(prompt).then(newImageSrc => {
-                const newImage = new Image();
-                newImage.src = newImageSrc;
-                newImage.onload = () => {
-                    const updatedElement = {
-                        src: newImage.src,
-                        width: newImage.width,
-                        height: newImage.height,
-                        isLoading: false,
-                    };
-                    dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: newElementId, changes: updatedElement }] } });
-                }
-            });
-        }
+        setPromptBarConfig({ onSubmit: handleGenerateSubmit, placeholder: 'Enter a prompt to generate an image...', buttonText: 'Generate' });
         setActiveTool(Tool.Select);
         return;
     }
@@ -364,12 +378,6 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         } else {
             alert('Brush tool can only be used on an image.');
         }
-        return;
-    }
-
-    if ([Tool.AutoStyle, Tool.Merge].includes(activeTool)) {
-        alert(`${activeTool} tool not implemented yet.`);
-        setActiveTool(Tool.Select);
         return;
     }
 
@@ -492,16 +500,21 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         const imageElement = elements.find(el => el.id === interaction.elementId) as ImageElement;
         if (!imageElement) return;
 
-        const prompt = window.prompt("Enter a prompt for the brushed area:");
-        if (prompt) {
-            const { data: imageBase64 } = await urlToBase64(imageElement.src);
-            const newImageSrc = await editImageWithMask(imageBase64, mask, prompt);
-            const newImage = new Image();
-            newImage.src = newImageSrc;
-            newImage.onload = () => {
-                dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: imageElement.id, changes: { src: newImageSrc, width: newImage.width, height: newImage.height } }] } });
-            };
-        }
+        setPromptBarConfig({
+            onSubmit: async (prompt) => {
+                const { data: imageBase64 } = await urlToBase64(imageElement.src);
+                const newImageSrc = await editImageWithMask(imageBase64, mask, prompt);
+                const newImage = new Image();
+                newImage.src = newImageSrc;
+                newImage.onload = () => {
+                    dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: imageElement.id, changes: { src: newImageSrc, width: newImage.width, height: newImage.height } }] } });
+                };
+                setPromptBarConfig(null);
+            },
+            placeholder: 'Enter a prompt for the brushed area...',
+            buttonText: 'Edit',
+        });
+
         const ctx = brushCanvas.getContext('2d');
         ctx?.clearRect(0, 0, brushCanvas.width, brushCanvas.height);
     }
@@ -568,24 +581,22 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     };
   };
 
-  const handleAutoStyle = async () => {
+  const handleAutoStyle = async (prompt: string) => {
     const selectedImageId = state.selectedElementIds[0];
     const imageElement = elements.find(el => el.id === selectedImageId) as ImageElement;
     if (!imageElement) return;
 
     const { data: imageBase64 } = await urlToBase64(imageElement.src);
-    const newImageSrc = await autoStyleProductPhoto(imageBase64);
+    const newImageSrc = await autoStyleProductPhoto(imageBase64, prompt);
     const newImage = new Image();
     newImage.src = newImageSrc;
     newImage.onload = () => {
         dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: selectedImageId, changes: { src: newImageSrc, width: newImage.width, height: newImage.height } }] } });
     };
+    setAutoStyleModalOpen(false);
   };
 
-  const handleMerge = async () => {
-    const prompt = window.prompt("Enter a prompt for merging the images:");
-    if (!prompt) return;
-
+  const handleMerge = async (prompt: string) => {
     const imageUrls = await Promise.all(
         state.selectedElementIds.map(async id => {
             const el = elements.find(e => e.id === id) as ImageElement;
@@ -599,7 +610,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     newImage.src = newImageSrc;
     newImage.onload = () => {
         const worldPoint = screenToWorld({ x: window.innerWidth / 2, y: window.innerHeight / 2 }, viewState);
-        const parentFrame = getFrameAtPoint(worldPoint);
+        const parentFrame = getFrameAtPoint(worldPoin t);
         const newElement: ImageElement = {
             id: crypto.randomUUID(),
             type: 'image',
@@ -614,6 +625,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         };
         dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newElement] } });
     }
+    setPromptBarConfig(null);
   };
   
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -691,6 +703,14 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
             />
         )}
       </div>
+      {promptBarConfig && (
+        <AIPromptBar
+            onSubmit={promptBarConfig.onSubmit}
+            placeholder={promptBarConfig.placeholder}
+            buttonText={promptBarConfig.buttonText}
+            isLoading={isLoading}
+        />
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -698,8 +718,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
           onClose={() => setContextMenu(null)}
           items={[
             { label: 'Edit with AI', action: handleAiEdit, disabled: state.selectedElementIds.length !== 1 },
-            { label: 'Auto-Style Product', action: handleAutoStyle, disabled: state.selectedElementIds.length !== 1 || elements.find(el => el.id === state.selectedElementIds[0])?.type !== 'image' },
-            { label: 'Merge Images', action: handleMerge, disabled: state.selectedElementIds.length < 2 || state.selectedElementIds.some(id => elements.find(el => el.id === id)?.type !== 'image') },
+            { label: 'Auto-Style Product', action: () => setAutoStyleModalOpen(true), disabled: state.selectedElementIds.length !== 1 || elements.find(el => el.id === state.selectedElementIds[0])?.type !== 'image' },
+            { label: 'Merge Images', action: () => setPromptBarConfig({ onSubmit: handleMerge, placeholder: 'Enter a prompt for merging the images...', buttonText: 'Merge' }), disabled: state.selectedElementIds.length < 2 || state.selectedElementIds.some(id => elements.find(el => el.id === id)?.type !== 'image') },
             { label: 'Bring to Front', action: () => dispatch({ type: 'BRING_TO_FRONT' }) },
             { label: 'Send to Back', action: () => dispatch({ type: 'SEND_TO_BACK' }) },
             { label: 'Duplicate', action: () => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }) },
@@ -711,6 +731,12 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         isOpen={aiEditModalOpen}
         onClose={() => setAiEditModalOpen(false)}
         onSubmit={handleAiEditSubmit}
+      />
+      <AutoStyleModal
+        isOpen={autoStyleModalOpen}
+        onClose={() => setAutoStyleModalOpen(false)}
+        onSubmit={handleAutoStyle}
+        isLoading={isLoading}
       />
       <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept="image/*" />
     </>
