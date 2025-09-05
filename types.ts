@@ -7,6 +7,7 @@ export enum Tool {
   Merge = 'MERGE',
   Generate = 'GENERATE',
   Upload = 'UPLOAD',
+  AutoStyle = 'AUTO_STYLE',
   Rectangle = 'RECTANGLE',
   Line = 'LINE',
   Arrow = 'ARROW',

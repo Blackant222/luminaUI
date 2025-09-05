@@ -1,6 +1,26 @@
 import React from 'react';
-import { MousePointer2, Paintbrush, Pen, Square, GitMerge, Sparkles, UploadCloud, Hand, Minus, MoveUpRight, Circle, Triangle, Star as StarIcon, Type } from 'lucide-react';
+import { MousePointer2, Paintbrush, Pen, Square, GitMerge, Sparkles, UploadCloud, Hand, Minus, MoveUpRight, Circle, Triangle, Star as StarIcon, Type, Camera } from 'lucide-react';
 import { Tool } from './types';
+
+// Custom icon for Auto-Style Product tool (Camera with magic sparkle overlay)
+const AutoStyleIcon = () => (
+  <div className="relative" style={{ width: 24, height: 24 }}>
+    <Camera size={24} />
+    <svg 
+      width="12" 
+      height="12" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+      className="absolute -top-1 -right-1 text-yellow-400"
+    >
+      <path d="M12 3l2 5h5l-4 4 2 5-5-3-5 3 2-5-4-4h5l2-5z" />
+    </svg>
+  </div>
+);
 
 export const TOOLS = [
   { id: Tool.Select, name: 'Select', icon: <MousePointer2 size={24} />, shortcut: 'V' },
@@ -12,6 +32,7 @@ export const TOOLS = [
   { id: Tool.Generate, name: 'Generate', icon: <Sparkles size={24} />, shortcut: 'G' },
   { id: Tool.Merge, name: 'Merge', icon: <GitMerge size={24} /> },
   { id: Tool.Upload, name: 'Upload', icon: <UploadCloud size={24} /> },
+  { id: Tool.AutoStyle, name: 'Auto-Style Product', icon: <AutoStyleIcon /> },
 ];
 
 export const SHAPE_TOOLS = [
@@ -33,6 +54,7 @@ export const CURSOR_MAP: { [key in Tool]: string } = {
   [Tool.Merge]: 'default',
   [Tool.Generate]: 'default',
   [Tool.Upload]: 'default',
+  [Tool.AutoStyle]: 'default',
   [Tool.Rectangle]: 'crosshair',
   [Tool.Line]: 'crosshair',
   [Tool.Arrow]: 'crosshair',

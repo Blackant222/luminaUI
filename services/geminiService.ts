@@ -45,6 +45,33 @@ export const urlToBase64 = async (url: string): Promise<{mimeType: string, data:
   });
 };
 
+// New function for auto-styling product photos
+export const autoStyleProductPhoto = async (
+  base64ImageData: string,
+  userPrompt?: string
+): Promise<string> => {
+  console.log(`Auto-styling product photo with user prompt: "${userPrompt || 'None provided'}"`);
+  
+  try {
+    console.log("Calling upload-auto-styled-product-photos function");
+    const { data, error } = await supabase.functions.invoke('upload-auto-styled-product-photos', {
+      body: { 
+        image: base64ImageData,
+        prompt: userPrompt
+      },
+    });
+    console.log("Function response - data:", data, "error:", error);
+
+    if (error) throw error;
+    if (!data.success) throw new Error(data.error || "Failed to auto-style product photo");
+
+    return data.image || data.response;
+  } catch (error) {
+    console.error("Error auto-styling product photo:", error);
+    throw error;
+  }
+};
+
 export const generateImage = async (prompt: string): Promise<string> => {
   console.log(`Generating image for prompt: "${prompt}"`);
   

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, MouseEvent, useEffect, DragEvent, WheelEvent, ChangeEvent, forwardRef, memo, KeyboardEvent } from 'react';
-import { Undo, Wand2, MessageSquareText } from 'lucide-react';
+import { Undo, Wand2, MessageSquareText, Camera } from 'lucide-react';
 import { Tool, CanvasElement, FrameElement, ImageElement, Point, DrawingElement, ShapeElement, Interaction, ContextMenuItem, TextElement, CanvasState, CanvasAction } from '../types';
 import { CURSOR_MAP } from '../constants';
 import * as geminiService from '../services/geminiService';
@@ -7,6 +7,7 @@ import Spinner from './Spinner';
 import AIPromptBar from './AIPromptBar';
 import ContextMenu from './ContextMenu';
 import PromptModal from './PromptModal';
+import AutoStyleModal from './AutoStyleModal';
 import { BringToFront, SendToBack, Copy, Trash2, BoxSelect, Maximize } from 'lucide-react';
 
 const getPolygonPoints = (centerX: number, centerY: number, radius: number, sides: number) => {
@@ -246,6 +247,11 @@ type AiEditPromptBarState = {
     elementToEdit: CanvasElement | null;
 }
 
+type AutoStyleModalState = {
+    isOpen: boolean;
+    elementToStyle: CanvasElement | null;
+}
+
 type ViewState = { pan: Point; zoom: number };
 
 const isPointInElement = (point: Point, element: CanvasElement) => {
@@ -290,6 +296,7 @@ const Canvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiveToo
   const [globalIsLoading, setGlobalIsLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [aiEditPromptBar, setAiEditPromptBar] = useState<AiEditPromptBarState>({ isOpen: false, elementToEdit: null });
+  const [autoStyleModal, setAutoStyleModal] = useState<AutoStyleModalState>({ isOpen: false, elementToStyle: null });
   const [isOverFrameForDrawing, setIsOverFrameForDrawing] = useState(false);
   const [expandingElementId, setExpandingElementId] = useState<string | null>(null);
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
@@ -725,13 +732,60 @@ const handleUpdateText = (id: string, content: string) => {
       }
   };
 
-  const handleWheel = useCallback((e: WheelEvent) => { e.preventDefault(); setContextMenu(null); const zoomFactor = 1 - e.deltaY * 0.001; const newZoom = Math.max(0.1, Math.min(view.zoom * zoomFactor, 10)); const mousePos = { x: e.clientX, y: e.clientY }; const worldPosBeforeZoom = screenToWorld(mousePos); const newPan = { x: mousePos.x - worldPosBeforeZoom.x * newZoom, y: mousePos.y - worldPosBeforeZoom.y * newZoom, }; setView({ zoom: newZoom, pan: newPan }); }, [view, screenToWorld]);
-  const handleBringToFront = useCallback(() => dispatch({ type: 'BRING_TO_FRONT' }), [dispatch]);
-  const handleSendToBack = useCallback(() => dispatch({ type: 'SEND_TO_BACK' }), [dispatch]);
-  const handleDuplicate = useCallback(() => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }), [dispatch]);
-  const handleDelete = useCallback(() => { dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }); interactionRef.current = null; }, [dispatch]);
-  const handleSelectAll = useCallback(() => dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: state.elements.map(el => el.id), shiftKey: false } }), [dispatch, state.elements]);
-  const handleContextMenu = useCallback((e: MouseEvent) => { e.preventDefault(); const targetIsCanvas = e.target === e.currentTarget; if(targetIsCanvas) { const items: ContextMenuItem[] = [ { label: 'Select All', action: handleSelectAll, icon: <BoxSelect size={16} /> }, ]; setContextMenu({ x: e.clientX, y: e.clientY, items }); } }, [handleSelectAll]);
+  // New function for auto-styling product photos
+  const handleAutoStyleSubmit = async (prompt: string) => {
+    console.log('Auto Style Submit called with prompt:', prompt);
+    console.log('autoStyleModal state:', autoStyleModal);
+    
+    const { elementToStyle } = autoStyleModal;
+    if (!elementToStyle || elementToStyle.type !== 'image') {
+      console.log('No image element to style or element is not an image');
+      return;
+    }
+    
+    const elementId = elementToStyle.id;
+    setAutoStyleModal({ isOpen: false, elementToStyle: null });
+    setGlobalIsLoading(true);
+    dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: true }}] } });
+
+    try {
+      // Get the base64 image data from the element
+      const imageData = elementToStyle.src;
+      const newImageSrc = await geminiService.autoStyleProductPhoto(imageData, prompt);
+      
+      // Create a new image element with the styled image
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        // Create a new element for the styled image
+        const newImageElement: ImageElement = {
+          id: crypto.randomUUID(),
+          type: 'image',
+          src: newImageSrc,
+          parentId: elementToStyle.parentId,
+          x: elementToStyle.x,
+          y: elementToStyle.y,
+          width: img.width,
+          height: img.height,
+          rotation: elementToStyle.rotation,
+          zIndex: elementToStyle.zIndex + 1, // Place above the original
+          isLoading: false
+        };
+        
+        // Add the new styled image to the canvas
+        dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newImageElement] } });
+        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [newImageElement.id], shiftKey: false } });
+      };
+      img.src = newImageSrc;
+
+    } catch (error) {
+      console.error("Auto-style failed:", error);
+      alert(`Sorry, the auto-styling failed. ${error instanceof Error ? error.message : 'Unknown error'}`);
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{id: elementId, changes: { isLoading: false }}] }});
+    } finally {
+      setGlobalIsLoading(false);
+    }
+  };
   
   const handleAiEditText = async () => {
       const selectedElements = state.elements.filter(el => state.selectedElementIds.includes(el.id));
@@ -751,6 +805,22 @@ const handleUpdateText = (id: string, content: string) => {
         setGlobalIsLoading(false);
       }
   };
+
+  // Add missing handler functions
+  const handleBringToFront = useCallback(() => dispatch({ type: 'BRING_TO_FRONT' }), [dispatch]);
+  const handleSendToBack = useCallback(() => dispatch({ type: 'SEND_TO_BACK' }), [dispatch]);
+  const handleDuplicate = useCallback(() => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }), [dispatch]);
+  const handleDelete = useCallback(() => dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }), [dispatch]);
+  const handleWheel = useCallback((e: WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      setView(v => ({ ...v, zoom: Math.max(0.1, Math.min(3, v.zoom + delta)) }));
+    }
+  }, []);
+  const handleContextMenu = useCallback((e: MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  }, []);
 
   const handleElementContextMenu = useCallback((e: MouseEvent, elementId: string) => {
       e.preventDefault();
@@ -772,7 +842,10 @@ const handleUpdateText = (id: string, content: string) => {
             setAiEditPromptBar({ isOpen: true, elementToEdit: currentElement });
             console.log('aiEditPromptBar set to open');
           }, icon: <Wand2 size={16}/> },
-        ...(currentElement.type === 'image' ? [{ label: 'Expand Image', action: () => setExpandingElementId(currentElement.id), icon: <Maximize size={16}/> }] : []),
+        ...(currentElement.type === 'image' ? [
+          { label: 'Auto-Style Product Photo', action: () => setAutoStyleModal({ isOpen: true, elementToStyle: currentElement }), icon: <Camera size={16}/> },
+          { label: 'Expand Image', action: () => setExpandingElementId(currentElement.id), icon: <Maximize size={16}/> }
+        ] : []),
         { label: 'Bring to Front', action: handleBringToFront, icon: <BringToFront size={16}/> },
         { label: 'Send to Back', action: handleSendToBack, icon: <SendToBack size={16}/> },
         { label: 'Duplicate', action: handleDuplicate, icon: <Copy size={16} /> },
@@ -876,6 +949,12 @@ const handleUpdateText = (id: string, content: string) => {
         }} 
         onSubmit={handleAiEditSubmit} 
         isLoading={globalIsLoading} 
+      />
+      <AutoStyleModal
+        isOpen={autoStyleModal.isOpen}
+        onClose={() => setAutoStyleModal({ isOpen: false, elementToStyle: null })}
+        onSubmit={handleAutoStyleSubmit}
+        isLoading={globalIsLoading}
       />
     </div>
   );
