@@ -421,6 +421,22 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
 
     if (activeTool === Tool.Brush) {
         if (clickedElement && clickedElement.type === 'image') {
+            const brushCanvas = brushCanvasRef.current;
+            if (!brushCanvas) return;
+            const ctx = brushCanvas.getContext('2d');
+            if (!ctx) return;
+
+            brushCanvas.width = canvasRef.current?.width || 0;
+            brushCanvas.height = canvasRef.current?.height || 0;
+            
+            ctx.strokeStyle = 'rgba(128, 0, 128, 0.5)';
+            ctx.lineWidth = 20;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            const localPoint = screenToWorld({x: e.clientX, y: e.clientY}, viewState);
+            ctx.moveTo(localPoint.x, localPoint.y);
+
             setInteraction({ type: 'brushing', elementId: clickedElement.id, points: [worldPoint] });
         } else {
             alert('Brush tool can only be used on an image.');
@@ -453,13 +469,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         if (!brushCanvas) return;
         const ctx = brushCanvas.getContext('2d');
         if (!ctx) return;
-
-        const imageElement = elements.find(el => el.id === interaction.elementId) as ImageElement;
-        if (!imageElement) return;
-
-        const localPoint = { x: worldPoint.x - imageElement.x, y: worldPoint.y - imageElement.y };
         
-        ctx.lineTo(localPoint.x, localPoint.y);
+        ctx.lineTo(worldPoint.x, worldPoint.y);
         ctx.stroke();
         return;
     }
@@ -544,6 +555,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
                 newImage.src = newImageSrc;
                 newImage.onload = () => {
                     dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: imageElement.id, changes: { src: newImageSrc, width: newImage.width, height: newImage.height } }] } });
+                    const ctx = brushCanvas.getContext('2d');
+                    ctx?.clearRect(0, 0, brushCanvas.width, brushCanvas.height);
                 };
                 setIsLoading(false);
                 setPromptBarConfig(null);
@@ -551,9 +564,6 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
             placeholder: 'Enter a prompt for the brushed area...',
             buttonText: 'Edit',
         });
-
-        const ctx = brushCanvas.getContext('2d');
-        ctx?.clearRect(0, 0, brushCanvas.width, brushCanvas.height);
     }
 
     if (interaction) {
@@ -707,7 +717,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         <canvas
             ref={brushCanvasRef}
             className="absolute inset-0 pointer-events-none"
-            style={{ zIndex: 1000 }}
+            style={{ zIndex: 1000, mixBlendMode: 'multiply' }}
         />
         {editingTextElement && (
             <textarea
@@ -750,9 +760,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
           items={[
-            { label: 'Edit with AI', action: () => setPromptBarConfig({ onSubmit: (prompt) => handleAiEdit(prompt), placeholder: 'Describe your edits...', buttonText: 'Edit' }), disabled: state.selectedElementIds.length !== 1 },
-            { label: 'Auto-Style Product', action: () => setAutoStyleModalOpen(true), disabled: state.selectedElementIds.length !== 1 || elements.find(el => el.id === state.selectedElementIds[0])?.type !== 'image' },
-            { label: 'Merge Images', action: () => setPromptBarConfig({ onSubmit: handleMerge, placeholder: 'Enter a prompt for merging the images...', buttonText: 'Merge' }), disabled: state.selectedElementIds.length < 2 || state.selectedElementIds.some(id => elements.find(el => el.id === id)?.type !== 'image') },
+            { label: 'Edit with AI', action: () => setPromptBarConfig({ onSubmit: (prompt) => handleAiEdit(prompt), placeholder: 'Describe your edits...', buttonText: 'Edit' }), disabled: selectedElementIds.length !== 1 },
+            { label: 'Auto-Style Product', action: () => setAutoStyleModalOpen(true), disabled: selectedElementIds.length !== 1 || elements.find(el => el.id === selectedElementIds[0])?.type !== 'image' },
+            { label: 'Merge Images', action: () => setPromptBarConfig({ onSubmit: handleMerge, placeholder: 'Enter a prompt for merging the images...', buttonText: 'Merge' }), disabled: selectedElementIds.length < 2 || selectedElementIds.some(id => elements.find(el => el.id === id)?.type !== 'image') },
             { label: 'Bring to Front', action: () => dispatch({ type: 'BRING_TO_FRONT' }) },
             { label: 'Send to Back', action: () => dispatch({ type: 'SEND_TO_BACK' }) },
             { label: 'Duplicate', action: () => dispatch({ type: 'DUPLICATE_SELECTED_ELEMENTS' }) },
