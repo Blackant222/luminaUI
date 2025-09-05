@@ -219,6 +219,38 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
             
             ctx.restore();
             
+            // Draw selection handles if selected
+            if (state.selectedElementIds.includes(element.id)) {
+              ctx.save();
+              ctx.translate(view.pan.x, view.pan.y);
+              ctx.scale(view.zoom, view.zoom);
+              
+              ctx.strokeStyle = '#6D35FF';
+              ctx.lineWidth = 2 / view.zoom;
+              ctx.setLineDash([5 / view.zoom, 5 / view.zoom]);
+              
+              // Draw resize handles
+              const handleSize = 8 / view.zoom;
+              const handles = [
+                { x: element.x - handleSize/2, y: element.y - handleSize/2 }, // top-left
+                { x: element.x + element.width/2 - handleSize/2, y: element.y - handleSize/2 }, // top-center
+                { x: element.x + element.width - handleSize/2, y: element.y - handleSize/2 }, // top-right
+                { x: element.x + element.width - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // right-center
+                { x: element.x + element.width - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-right
+                { x: element.x + element.width/2 - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-center
+                { x: element.x - handleSize/2, y: element.y + element.height - handleSize/2 }, // bottom-left
+                { x: element.x - handleSize/2, y: element.y + element.height/2 - handleSize/2 }, // left-center
+              ];
+              
+              handles.forEach(handle => {
+                ctx.fillStyle = '#6D35FF';
+                ctx.fillRect(handle.x, handle.y, handleSize, handleSize);
+                ctx.strokeRect(handle.x, handle.y, handleSize, handleSize);
+              });
+              
+              ctx.restore();
+            }
+            
             // If this is the expanding element, draw expansion handles
             if (expandingElementId === element.id) {
               ctx.save();
@@ -708,6 +740,40 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
     const clickedElement = sortedElements.find(el => isPointInElement(worldPos, el));
     
     if (clickedElement) {
+      // Check if we're clicking on a resize handle of a selected element
+      if (state.selectedElementIds.includes(clickedElement.id)) {
+        // Check if click is on a resize handle
+        const handleSize = 8 / view.zoom;
+        const handles = [
+          { x: clickedElement.x - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-left' },
+          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-center' },
+          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y - handleSize/2, handle: 'top-right' },
+          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'right-center' },
+          { x: clickedElement.x + clickedElement.width - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-right' },
+          { x: clickedElement.x + clickedElement.width/2 - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-center' },
+          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height - handleSize/2, handle: 'bottom-left' },
+          { x: clickedElement.x - handleSize/2, y: clickedElement.y + clickedElement.height/2 - handleSize/2, handle: 'left-center' },
+        ];
+        
+        for (const handle of handles) {
+          if (
+            screenPos.x >= handle.x && 
+            screenPos.x <= handle.x + handleSize && 
+            screenPos.y >= handle.y && 
+            screenPos.y <= handle.y + handleSize
+          ) {
+            interactionRef.current = { 
+              type: 'resize', 
+              handle: handle.handle, 
+              startX: screenPos.x, 
+              startY: screenPos.y, 
+              originalElement: clickedElement 
+            };
+            return;
+          }
+        }
+      }
+      
       if (!state.selectedElementIds.includes(clickedElement.id)) {
         dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
       }
@@ -766,6 +832,12 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       return;
     }
     
+    if (currentInteraction.type === 'resize') {
+      // Visual feedback for resizing
+      redrawCanvas();
+      return;
+    }
+    
     if (currentInteraction.type === 'expand' && expandingElementId) {
       // Visual feedback for expansion
       redrawCanvas();
@@ -801,6 +873,76 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
       // Brushing finished, show prompt bar
       interactionRef.current = null;
       setAiEditPromptBar({ isOpen: true, elementToEdit: brushState.element });
+      return;
+    }
+    
+    if (currentInteraction.type === 'resize') {
+      const { handle, startX, startY, originalElement } = currentInteraction;
+      const screenPos = { x: e.clientX, y: e.clientY };
+      const dx = (screenPos.x - startX) / view.zoom;
+      const dy = (screenPos.y - startY) / view.zoom;
+      
+      // Calculate new dimensions based on handle
+      let newWidth = originalElement.width;
+      let newHeight = originalElement.height;
+      let newX = originalElement.x;
+      let newY = originalElement.y;
+      
+      switch (handle) {
+        case 'right-center':
+          newWidth = Math.max(10, originalElement.width + dx);
+          break;
+        case 'bottom-center':
+          newHeight = Math.max(10, originalElement.height + dy);
+          break;
+        case 'bottom-right':
+          newWidth = Math.max(10, originalElement.width + dx);
+          newHeight = Math.max(10, originalElement.height + dy);
+          break;
+        case 'top-left':
+          newWidth = Math.max(10, originalElement.width - dx);
+          newHeight = Math.max(10, originalElement.height - dy);
+          newX = originalElement.x + dx;
+          newY = originalElement.y + dy;
+          break;
+        case 'top-right':
+          newWidth = Math.max(10, originalElement.width + dx);
+          newHeight = Math.max(10, originalElement.height - dy);
+          newY = originalElement.y + dy;
+          break;
+        case 'bottom-left':
+          newWidth = Math.max(10, originalElement.width - dx);
+          newHeight = Math.max(10, originalElement.height + dy);
+          newX = originalElement.x + dx;
+          break;
+        case 'top-center':
+          newHeight = Math.max(10, originalElement.height - dy);
+          newY = originalElement.y + dy;
+          break;
+        case 'left-center':
+          newWidth = Math.max(10, originalElement.width - dx);
+          newX = originalElement.x + dx;
+          break;
+      }
+      
+      // Update the element
+      dispatch({ 
+        type: 'UPDATE_ELEMENTS', 
+        payload: { 
+          updates: [{ 
+            id: originalElement.id, 
+            changes: { 
+              width: newWidth, 
+              height: newHeight, 
+              x: newX, 
+              y: newY
+            } 
+          }] 
+        } 
+      });
+      
+      interactionRef.current = null;
+      redrawCanvas();
       return;
     }
     
@@ -924,7 +1066,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
           height: Math.max(10, height),
           rotation: 0,
           zIndex: state.elements.length > 0 ? Math.max(...state.elements.map(el => el.zIndex)) + 1 : 1,
-          shapeType: shapeType!,
+          shapeType,
           strokeColor: color,
           strokeWidth: 2,
           fillColor: 'transparent',
@@ -1009,7 +1151,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({ activeTool, uploadTrigger, setActiv
 
     setGlobalIsLoading(true);
     dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementId, changes: { isLoading: true } }] } });
-    
+
     try {
         const maskData = finalMask.toDataURL('image/png');
         const newImageSrc = await geminiService.editImageWithMask(element.src, maskData, prompt);
