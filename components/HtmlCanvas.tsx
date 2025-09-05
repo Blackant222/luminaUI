@@ -14,7 +14,6 @@ import {
 } from '../types';
 import { editImageWithPrompt, urlToBase64, generateImage, autoStyleProductPhoto, mergeImages, editImageWithMask } from '../services/geminiService';
 import ContextMenu from './ContextMenu';
-import { AiEditModal } from './AiEditModal';
 import AIPromptBar from './AIPromptBar';
 import AutoStyleModal from './AutoStyleModal';
 import { CURSOR_MAP, SHAPE_TOOLS } from '../constants';
@@ -35,7 +34,7 @@ const isPointInElement = (point: Point, element: CanvasElement): boolean => {
 };
 
 const getResizeCorner = (point: Point, element: ImageElement, zoom: number): string | null => {
-    const handleSize = 8 / zoom;
+    const handleSize = 10 / zoom;
     const corners = {
         nw: { x: element.x, y: element.y },
         ne: { x: element.x + element.width, y: element.y },
@@ -45,10 +44,10 @@ const getResizeCorner = (point: Point, element: ImageElement, zoom: number): str
 
     for (const [name, corner] of Object.entries(corners)) {
         if (
-            point.x >= corner.x - handleSize &&
-            point.x <= corner.x + handleSize &&
-            point.y >= corner.y - handleSize &&
-            point.y <= corner.y + handleSize
+            point.x >= corner.x - handleSize / 2 &&
+            point.x <= corner.x + handleSize / 2 &&
+            point.y >= corner.y - handleSize / 2 &&
+            point.y <= corner.y + handleSize / 2
         ) {
             return name;
         }
@@ -72,7 +71,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
   dispatch,
   color,
 }) => {
-  const { elements } = state;
+  const { elements, selectedElementIds } = state;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const brushCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -86,13 +85,17 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
   const [dragStart, setDragStart] = useState<Point>({ x: 0, y: 0 });
   const [interaction, setInteraction] = useState<Interaction | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; elementId: string } | null>(null);
-  const [aiEditModalOpen, setAiEditModalOpen] = useState(false);
   const [autoStyleModalOpen, setAutoStyleModalOpen] = useState(false);
   const [promptBarConfig, setPromptBarConfig] = useState<{ onSubmit: (prompt: string) => void; placeholder: string; buttonText: string; } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [elementToEdit, setElementToEdit] = useState<ImageElement | null>(null);
   const [resizingCorner, setResizingCorner] = useState<string | null>(null);
   const [editingTextElement, setEditingTextElement] = useState<TextElement | null>(null);
+
+  const getElementAtPoint = (point: Point): CanvasElement | null => {
+    return [...elements]
+        .sort((a, b) => b.zIndex - a.zIndex)
+        .find(element => isPointInElement(point, element)) || null;
+  }
 
   const getFrameAtPoint = (point: Point): FrameElement | null => {
     return elements
@@ -235,6 +238,28 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         ctx.restore();
     };
 
+    const drawSelectionBox = (element: CanvasElement) => {
+        ctx.save();
+        ctx.strokeStyle = '#6D35FF';
+        ctx.lineWidth = 2 / viewState.zoom;
+        ctx.strokeRect(element.x, element.y, element.width, element.height);
+
+        if (element.type === 'image') {
+            const handleSize = 10 / viewState.zoom;
+            ctx.fillStyle = '#6D35FF';
+            const corners = {
+                nw: { x: element.x, y: element.y },
+                ne: { x: element.x + element.width, y: element.y },
+                sw: { x: element.x, y: element.y + element.height },
+                se: { x: element.x + element.width, y: element.y + element.height },
+            };
+            for (const corner of Object.values(corners)) {
+                ctx.fillRect(corner.x - handleSize / 2, corner.y - handleSize / 2, handleSize, handleSize);
+            }
+        }
+        ctx.restore();
+    }
+
     const elementMap = new Map(elements.map(el => [el.id, el]));
     const drawnElements = new Set<string>();
 
@@ -251,8 +276,15 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         }
     });
 
+    selectedElementIds.forEach(id => {
+        const element = elements.find(el => el.id === id);
+        if (element) {
+            drawSelectionBox(element);
+        }
+    });
+
     ctx.restore();
-  }, [elements, viewState, loadedImages]);
+  }, [elements, viewState, loadedImages, selectedElementIds]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -266,7 +298,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const worldPoint = screenToWorld({ x: e.clientX, y: e.clientY }, viewState);
-    const clickedElement = elements.find(el => isPointInElement(worldPoint, el));
+    const clickedElement = getElementAtPoint(worldPoint);
     if (clickedElement && clickedElement.type === 'text') {
         setEditingTextElement(clickedElement);
     }
@@ -314,7 +346,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         }
     } catch (error) {
         console.error(error);
-        dispatch({ type: 'DELETE_SELECTED_ELEMENTS' }); // a bit aggressive
+        dispatch({ type: 'DELETE_SELECTED_ELEMENTS' });
     }
     setIsLoading(false);
     setPromptBarConfig(null);
@@ -329,6 +361,22 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     if (activeTool === Tool.Hand) return;
 
     const worldPoint = screenToWorld(startPoint, viewState);
+    const clickedElement = getElementAtPoint(worldPoint);
+
+    if (activeTool === Tool.Select && clickedElement && clickedElement.type === 'image') {
+        const corner = getResizeCorner(worldPoint, clickedElement as ImageElement, viewState.zoom);
+        if (corner) {
+            setResizingCorner(corner);
+            dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
+            return;
+        }
+    }
+
+    if (activeTool === Tool.Select && clickedElement) {
+        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
+        return;
+    }
+
     const parentFrame = getFrameAtPoint(worldPoint);
 
     if (activeTool === Tool.Frame) {
@@ -372,8 +420,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     }
 
     if (activeTool === Tool.Brush) {
-        const clickedElement = elements.find(el => el.type === 'image' && isPointInElement(worldPoint, el));
-        if (clickedElement) {
+        if (clickedElement && clickedElement.type === 'image') {
             setInteraction({ type: 'brushing', elementId: clickedElement.id, points: [worldPoint] });
         } else {
             alert('Brush tool can only be used on an image.');
@@ -381,19 +428,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         return;
     }
 
-    const clickedElement = elements.find(el => isPointInElement(worldPoint, el));
-
-    if (activeTool === Tool.Select && clickedElement) {
-        if (clickedElement.type === 'image') {
-            const corner = getResizeCorner(worldPoint, clickedElement as ImageElement, viewState.zoom);
-            if (corner) {
-                setResizingCorner(corner);
-                dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
-                return;
-            }
-        }
-        dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: e.shiftKey } });
-    } else if (activeTool === Tool.Select && !clickedElement) {
+    if (activeTool === Tool.Select && !clickedElement) {
         dispatch({ type: 'CLEAR_SELECTION' });
     }
   };
@@ -467,8 +502,8 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         return;
     }
 
-    if (resizingCorner && state.selectedElementIds.length === 1) {
-        const selectedElement = elements.find(el => el.id === state.selectedElementIds[0]) as ImageElement;
+    if (resizingCorner && selectedElementIds.length === 1) {
+        const selectedElement = elements.find(el => el.id === selectedElementIds[0]) as ImageElement;
         if (!selectedElement) return;
 
         let { x, y, width, height } = selectedElement;
@@ -479,11 +514,11 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
             case 'ne': width = worldPoint.x - x; height = y + height - worldPoint.y; y = worldPoint.y; break;
             case 'nw': width = x + width - worldPoint.x; height = y + height - worldPoint.y; x = worldPoint.x; y = worldPoint.y; break;
         }
-        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: state.selectedElementIds[0], changes: { width, height, x, y } }] }});
+        dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: selectedElementIds[0], changes: { width, height, x, y } }] }});
 
-    } else if (activeTool === Tool.Select && state.selectedElementIds.length > 0) {
+    } else if (activeTool === Tool.Select && selectedElementIds.length > 0) {
       const delta = { x: dx / viewState.zoom, y: dy / viewState.zoom };
-      const updates = state.selectedElementIds.map(id => {
+      const updates = selectedElementIds.map(id => {
         const el = elements.find(e => e.id === id)!;
         return { id, changes: { x: el.x + delta.x, y: el.y + delta.y }};
       });
@@ -502,6 +537,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
 
         setPromptBarConfig({
             onSubmit: async (prompt) => {
+                setIsLoading(true);
                 const { data: imageBase64 } = await urlToBase64(imageElement.src);
                 const newImageSrc = await editImageWithMask(imageBase64, mask, prompt);
                 const newImage = new Image();
@@ -509,6 +545,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
                 newImage.onload = () => {
                     dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: imageElement.id, changes: { src: newImageSrc, width: newImage.width, height: newImage.height } }] } });
                 };
+                setIsLoading(false);
                 setPromptBarConfig(null);
             },
             placeholder: 'Enter a prompt for the brushed area...',
@@ -543,9 +580,9 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     const point = screenToWorld({ x: e.clientX, y: e.clientY }, viewState);
-    const clickedElement = elements.find(el => isPointInElement(point, el));
+    const clickedElement = getElementAtPoint(point);
     if (clickedElement) {
-        if (!state.selectedElementIds.includes(clickedElement.id)) {
+        if (!selectedElementIds.includes(clickedElement.id)) {
             dispatch({ type: 'SELECT_ELEMENTS', payload: { ids: [clickedElement.id], shiftKey: false } });
         }
         setContextMenu({ x: e.clientX, y: e.clientY, elementId: clickedElement.id });
@@ -554,38 +591,31 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const handleAiEdit = async () => {
-    if (state.selectedElementIds.length === 0) return;
-    const element = elements.find(el => el.id === state.selectedElementIds[0]);
-    if (!element) return;
+  const handleAiEdit = async (prompt: string) => {
+    if (selectedElementIds.length !== 1) return;
+    const element = elements.find(el => el.id === selectedElementIds[0]);
+    if (!element || element.type !== 'image') return;
 
-    if (element.type === 'image') {
-        setElementToEdit(element);
-        setAiEditModalOpen(true);
-    } else if (element.type === 'frame') {
-        alert('Frame editing not implemented yet');
-    }
-    setContextMenu(null);
-  };
-
-  const handleAiEditSubmit = async (prompt: string) => {
-    if (!elementToEdit || !elementToEdit.src) return;
-    const { data: imageBase64 } = await urlToBase64(elementToEdit.src);
+    setIsLoading(true);
+    const { data: imageBase64 } = await urlToBase64(element.src);
     const newImageSrc = await editImageWithPrompt(imageBase64, prompt);
     const newImage = new Image();
     newImage.crossOrigin = "anonymous";
     newImage.src = newImageSrc;
     newImage.onload = () => {
       setLoadedImages(prev => ({...prev, [newImageSrc]: newImage}));
-      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: elementToEdit.id, changes: { src: newImageSrc } }] } });
+      dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: element.id, changes: { src: newImageSrc } }] } });
     };
+    setIsLoading(false);
+    setPromptBarConfig(null);
   };
 
   const handleAutoStyle = async (prompt: string) => {
-    const selectedImageId = state.selectedElementIds[0];
+    const selectedImageId = selectedElementIds[0];
     const imageElement = elements.find(el => el.id === selectedImageId) as ImageElement;
     if (!imageElement) return;
 
+    setIsLoading(true);
     const { data: imageBase64 } = await urlToBase64(imageElement.src);
     const newImageSrc = await autoStyleProductPhoto(imageBase64, prompt);
     const newImage = new Image();
@@ -593,12 +623,14 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
     newImage.onload = () => {
         dispatch({ type: 'UPDATE_ELEMENTS', payload: { updates: [{ id: selectedImageId, changes: { src: newImageSrc, width: newImage.width, height: newImage.height } }] } });
     };
+    setIsLoading(false);
     setAutoStyleModalOpen(false);
   };
 
   const handleMerge = async (prompt: string) => {
+    setIsLoading(true);
     const imageUrls = await Promise.all(
-        state.selectedElementIds.map(async id => {
+        selectedElementIds.map(async id => {
             const el = elements.find(e => e.id === id) as ImageElement;
             const { data } = await urlToBase64(el.src);
             return data;
@@ -625,6 +657,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
         };
         dispatch({ type: 'ADD_ELEMENTS', payload: { elements: [newElement] } });
     }
+    setIsLoading(false);
     setPromptBarConfig(null);
   };
   
@@ -717,7 +750,7 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
           items={[
-            { label: 'Edit with AI', action: handleAiEdit, disabled: state.selectedElementIds.length !== 1 },
+            { label: 'Edit with AI', action: () => setPromptBarConfig({ onSubmit: (prompt) => handleAiEdit(prompt), placeholder: 'Describe your edits...', buttonText: 'Edit' }), disabled: state.selectedElementIds.length !== 1 },
             { label: 'Auto-Style Product', action: () => setAutoStyleModalOpen(true), disabled: state.selectedElementIds.length !== 1 || elements.find(el => el.id === state.selectedElementIds[0])?.type !== 'image' },
             { label: 'Merge Images', action: () => setPromptBarConfig({ onSubmit: handleMerge, placeholder: 'Enter a prompt for merging the images...', buttonText: 'Merge' }), disabled: state.selectedElementIds.length < 2 || state.selectedElementIds.some(id => elements.find(el => el.id === id)?.type !== 'image') },
             { label: 'Bring to Front', action: () => dispatch({ type: 'BRING_TO_FRONT' }) },
@@ -727,11 +760,6 @@ const HtmlCanvas: React.FC<CanvasProps> = ({
           ]}
         />
       )}
-      <AiEditModal
-        isOpen={aiEditModalOpen}
-        onClose={() => setAiEditModalOpen(false)}
-        onSubmit={handleAiEditSubmit}
-      />
       <AutoStyleModal
         isOpen={autoStyleModalOpen}
         onClose={() => setAutoStyleModalOpen(false)}
